@@ -4,6 +4,7 @@
 set -eu
 
 FAKEAI_DIR="${FAKEAI_DIR:-$HOME/.config/fakeai}"
+STUB_HOOKS="applypatch-msg pre-applypatch post-applypatch pre-commit pre-merge-commit prepare-commit-msg post-commit pre-rebase post-checkout post-merge pre-push post-rewrite sendemail-validate"
 
 usage() {
     cat >&2 <<'EOF'
@@ -89,7 +90,14 @@ emit_hook() {
 # fakeai hook v1
 
 chain() {
-    exit 0
+    [ "${_FAKEAI_CHAINED:-0}" = "1" ] && exit 0
+    common=$(git rev-parse --git-common-dir 2>/dev/null) || exit 0
+    h="$common/hooks/${0##*/}"
+    [ -x "$h" ] || exit 0
+    self_dir=$(cd "$(dirname "$0")" 2>/dev/null && pwd -P) || self_dir=""
+    hook_dir=$(cd "$(dirname "$h")" 2>/dev/null && pwd -P) || hook_dir=""
+    [ -n "$self_dir" ] && [ "$self_dir" = "$hook_dir" ] && exit 0
+    _FAKEAI_CHAINED=1 exec "$h" "$@"
 }
 
 [ -n "${NO_FAKEAI:-}" ] && [ "$NO_FAKEAI" != "0" ] && chain "$@"
@@ -190,6 +198,21 @@ chain "$@"
 EOF
 }
 
+emit_chain_stub() {
+    cat <<'EOF'
+#!/bin/sh
+# fakeai chain stub v1
+[ "${_FAKEAI_CHAINED:-0}" = "1" ] && exit 0
+common=$(git rev-parse --git-common-dir 2>/dev/null) || exit 0
+h="$common/hooks/${0##*/}"
+[ -x "$h" ] || exit 0
+self_dir=$(cd "$(dirname "$0")" 2>/dev/null && pwd -P) || self_dir=""
+hook_dir=$(cd "$(dirname "$h")" 2>/dev/null && pwd -P) || hook_dir=""
+[ -n "$self_dir" ] && [ "$self_dir" = "$hook_dir" ] && exit 0
+_FAKEAI_CHAINED=1 exec "$h" "$@"
+EOF
+}
+
 emit_ctl() {
     cat <<'EOF'
 #!/bin/sh
@@ -249,12 +272,14 @@ write_managed() {
     wm_force=$4
     wm_exec=$5
 
+    WRITTEN_KEPT=0
     if [ -f "$wm_target" ] && [ -n "$wm_prev" ] && [ "$wm_prev" != "NONE" ]; then
         wm_cur=$(git hash-object "$wm_target" 2>/dev/null || true)
         if [ "$wm_cur" != "$wm_prev" ]; then
             if [ "$wm_force" -eq 0 ]; then
                 echo "fakeai: warning: $(basename "$wm_target") was hand-modified; keeping existing file (use --force to overwrite)" >&2
                 WRITTEN_HASH=$wm_prev
+                WRITTEN_KEPT=1
                 return 0
             fi
             echo "fakeai: warning: overwriting modified $(basename "$wm_target") (--force)" >&2
@@ -297,23 +322,39 @@ cmd_install_global() {
         W_HOOKSPATH_PREV=$M_HOOKSPATH_PREV
         W_ALIAS_NAME=$M_ALIAS_NAME
         W_ALIAS_VAL=$M_ALIAS_VAL
-        W_STUB_HASH=$M_STUB_HASH
-        W_STUBS=$M_STUBS
         prev_hook_hash=$M_HOOK_HASH
+        prev_stub_hash=$M_STUB_HASH
         prev_ctl_hash=$M_CTL_HASH
     else
+        for stub in $STUB_HOOKS; do
+            if [ -e "$hook_dir/$stub" ] && [ "$force" -eq 0 ]; then
+                echo "fakeai: $hook_dir/$stub exists without fakeai manifest; refusing to clobber (try --local)" >&2
+                exit 1
+            fi
+        done
         W_HOOKSPATH_PREV=UNSET
         W_ALIAS_NAME=NONE
         W_ALIAS_VAL=""
-        W_STUB_HASH=NONE
-        W_STUBS=NONE
         prev_hook_hash=NONE
+        prev_stub_hash=NONE
         prev_ctl_hash=NONE
     fi
 
     mkdir -p "$hook_dir"
     write_managed "$hook_dir/commit-msg" emit_hook "$prev_hook_hash" "$force" 1
     W_HOOK_HASH=$WRITTEN_HASH
+    W_STUB_HASH=""
+    stub_kept=0
+    for stub in $STUB_HOOKS; do
+        write_managed "$hook_dir/$stub" emit_chain_stub "$prev_stub_hash" "$force" 1
+        if [ "$WRITTEN_KEPT" -eq 1 ]; then
+            stub_kept=1
+        elif [ -z "$W_STUB_HASH" ]; then
+            W_STUB_HASH=$WRITTEN_HASH
+        fi
+    done
+    [ "$stub_kept" -eq 1 ] && [ "$prev_stub_hash" != "NONE" ] && W_STUB_HASH=$prev_stub_hash
+    W_STUBS=$STUB_HOOKS
     write_managed "$ctl" emit_ctl "$prev_ctl_hash" "$force" 1
     W_CTL_HASH=$WRITTEN_HASH
 
