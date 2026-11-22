@@ -513,6 +513,31 @@ write_managed() {
     WRITTEN_HASH=$(git hash-object "$wm_target")
 }
 
+sq_escape() {
+    s=$1
+    out=""
+    while [ -n "$s" ]; do
+        case "$s" in
+            *"'"*)
+                prefix=${s%%\'*}
+                out="$out$prefix'\\''"
+                s=${s#*\'}
+                ;;
+            *)
+                out="$out$s"
+                s=""
+                ;;
+        esac
+    done
+    printf '%s' "$out"
+}
+
+build_alias_val() {
+    n_esc=$(sq_escape "$1")
+    e_esc=$(sq_escape "$2")
+    printf "!f(){ [ -n \"\$GIT_PREFIX\" ] && cd \"\$GIT_PREFIX\"; GIT_AUTHOR_NAME='%s' GIT_AUTHOR_EMAIL='%s' NO_FAKEAI=1 git \"\$@\"; };f" "$n_esc" "$e_esc"
+}
+
 cmd_install_global() {
     persona=$1
     force=$2
@@ -542,8 +567,6 @@ cmd_install_global() {
     if [ -f "$manifest" ]; then
         read_manifest "$manifest"
         W_HOOKSPATH_PREV=$M_HOOKSPATH_PREV
-        W_ALIAS_NAME=$M_ALIAS_NAME
-        W_ALIAS_VAL=$M_ALIAS_VAL
         prev_hook_hash=$M_HOOK_HASH
         prev_stub_hash=$M_STUB_HASH
         prev_ctl_hash=$M_CTL_HASH
@@ -554,9 +577,9 @@ cmd_install_global() {
                 exit 1
             fi
         done
+        M_ALIAS_NAME=NONE
+        M_ALIAS_VAL=""
         W_HOOKSPATH_PREV=UNSET
-        W_ALIAS_NAME=NONE
-        W_ALIAS_VAL=""
         prev_hook_hash=NONE
         prev_stub_hash=NONE
         prev_ctl_hash=NONE
@@ -584,6 +607,30 @@ cmd_install_global() {
     git config --global fakeai.persona "$persona"
     if ! git config --global --get fakeai.rate >/dev/null 2>&1; then
         git config --global fakeai.rate 1
+    fi
+
+    get_identity "$persona"
+    new_alias_val=$(build_alias_val "$ID_NAME" "$ID_EMAIL")
+    if [ -n "$M_ALIAS_NAME" ] && [ "$M_ALIAS_NAME" != "NONE" ] && [ "$M_ALIAS_NAME" != "$persona" ]; then
+        cur_prev=$(git config --global --get "alias.$M_ALIAS_NAME" 2>/dev/null || true)
+        if [ -n "$cur_prev" ]; then
+            if [ "$cur_prev" = "$M_ALIAS_VAL" ]; then
+                git config --global --unset "alias.$M_ALIAS_NAME" || true
+            else
+                echo "fakeai: warning: previous alias.$M_ALIAS_NAME was modified; leaving untouched" >&2
+            fi
+        fi
+    fi
+
+    cur_alias=$(git config --global --get "alias.$persona" 2>/dev/null || true)
+    if [ -z "$cur_alias" ] || [ "$cur_alias" = "$new_alias_val" ]; then
+        git config --global "alias.$persona" "$new_alias_val"
+        W_ALIAS_NAME=$persona
+        W_ALIAS_VAL=$new_alias_val
+    else
+        echo "fakeai: note: alias.$persona already exists; leaving untouched" >&2
+        W_ALIAS_NAME=NONE
+        W_ALIAS_VAL=""
     fi
 
     W_MODE=global
