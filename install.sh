@@ -218,7 +218,229 @@ emit_ctl() {
 #!/bin/sh
 # fakeai offline control CLI (status / off)
 set -eu
-echo "fakeai: control CLI stub"
+
+if [ -z "${FAKEAI_DIR:-}" ]; then
+    script_dir=$(cd "$(dirname "$0")" 2>/dev/null && pwd -P) || script_dir=""
+    if [ -n "$script_dir" ] && [ -f "$script_dir/manifest" ]; then
+        FAKEAI_DIR=$script_dir
+    else
+        FAKEAI_DIR="$HOME/.config/fakeai"
+    fi
+fi
+
+ctl_usage() {
+    cat >&2 <<'USAGE'
+usage: sh fakeai.sh [--local] <status|off>
+USAGE
+}
+
+canon_path() {
+    p=${1:-}
+    [ -z "$p" ] && return 0
+    suffix=""
+    while [ ! -d "$p" ] && [ "$p" != "/" ] && [ "$p" != "." ]; do
+        b=$(basename "$p")
+        suffix="/$b$suffix"
+        p=$(dirname "$p")
+    done
+    if [ -d "$p" ]; then
+        cp=$(cd "$p" 2>/dev/null && pwd -P) || cp=$p
+        printf '%s%s\n' "${cp%/}" "$suffix"
+    else
+        printf '%s\n' "${1%/}"
+    fi
+}
+
+read_manifest() {
+    M_VERSION="" M_MODE="" M_HOOKS_DIR="" M_HOOKSPATH_PREV="UNSET" M_PERSONA=""
+    M_KEYS="" M_ALIAS_NAME="NONE" M_ALIAS_VAL="" M_HOOK_HASH="NONE"
+    M_STUB_HASH="NONE" M_CTL_HASH="NONE" M_STUBS="NONE"
+    while IFS= read -r line || [ -n "$line" ]; do
+        k=${line%%=*}
+        v=${line#*=}
+        case "$k" in
+            version) M_VERSION=$v ;;
+            mode) M_MODE=$v ;;
+            hooks_dir) M_HOOKS_DIR=$v ;;
+            hooksPath_prev) M_HOOKSPATH_PREV=$v ;;
+            persona) M_PERSONA=$v ;;
+            keys) M_KEYS=$v ;;
+            alias_name) M_ALIAS_NAME=$v ;;
+            alias_val) M_ALIAS_VAL=$v ;;
+            hook_hash) M_HOOK_HASH=$v ;;
+            stub_hash) M_STUB_HASH=$v ;;
+            ctl_hash) M_CTL_HASH=$v ;;
+            stubs) M_STUBS=$v ;;
+        esac
+    done < "$1"
+}
+
+remove_verified_file() {
+    rv_path=$1
+    rv_exp=$2
+    rv_label=$3
+    [ -e "$rv_path" ] || return 0
+    if [ -n "$rv_exp" ] && [ "$rv_exp" != "NONE" ]; then
+        rv_cur=$(git hash-object "$rv_path" 2>/dev/null || true)
+        if [ "$rv_cur" != "$rv_exp" ]; then
+            echo "fakeai: warning: keeping modified $rv_label ($rv_path)" >&2
+            partial=1
+            return 0
+        fi
+    fi
+    rm -f "$rv_path"
+}
+
+cmd_status() {
+    manifest=$1
+    scope_flag=$2
+    if [ ! -f "$manifest" ]; then
+        hp=$(git config "$scope_flag" --get core.hooksPath 2>/dev/null || echo unset)
+        printf 'state: not installed\nhooksPath: %s\n' "$hp"
+        return 0
+    fi
+    read_manifest "$manifest"
+    state="installed"
+    [ -x "$M_HOOKS_DIR/commit-msg" ] || state="partially uninstalled"
+    if [ "$M_MODE" = "global" ]; then
+        cur_exp=$(git config --global --path --get core.hooksPath 2>/dev/null || true)
+        [ "$(canon_path "$cur_exp")" = "$M_HOOKS_DIR" ] || state="partially uninstalled"
+    fi
+    persona=$(git config "$scope_flag" --get fakeai.persona 2>/dev/null || echo unset)
+    rate=$(git config "$scope_flag" --get fakeai.rate 2>/dev/null || echo unset)
+    hp=$(git config "$scope_flag" --get core.hooksPath 2>/dev/null || echo unset)
+    alias_disp=$M_ALIAS_NAME
+    [ "$alias_disp" = "NONE" ] && alias_disp=none
+    printf 'state: %s (%s)\npersona: %s\nrate: %s\nhooksPath: %s\nalias: %s\n' \
+        "$state" "$M_MODE" "$persona" "$rate" "$hp" "$alias_disp"
+}
+
+cmd_off() {
+    manifest=$1
+    scope_flag=$2
+    if [ ! -f "$manifest" ]; then
+        echo "fakeai: not installed; nothing to do"
+        return 0
+    fi
+    read_manifest "$manifest"
+    partial=0
+
+    remove_verified_file "$M_HOOKS_DIR/commit-msg" "$M_HOOK_HASH" "commit-msg"
+    if [ -n "$M_STUBS" ] && [ "$M_STUBS" != "NONE" ]; then
+        for stub in $M_STUBS; do
+            remove_verified_file "$M_HOOKS_DIR/$stub" "$M_STUB_HASH" "$stub"
+        done
+    fi
+
+    if [ "$M_MODE" = "global" ]; then
+        cur_raw=$(git config --global --get core.hooksPath 2>/dev/null || true)
+        cur_exp=$(git config --global --path --get core.hooksPath 2>/dev/null || true)
+        if [ -n "$cur_raw" ]; then
+            cur_canon=$(canon_path "$cur_exp")
+            if [ "$cur_canon" = "$M_HOOKS_DIR" ]; then
+                if [ "$M_HOOKSPATH_PREV" = "UNSET" ] || [ -z "$M_HOOKSPATH_PREV" ]; then
+                    git config --global --unset core.hooksPath || true
+                else
+                    git config --global core.hooksPath "$M_HOOKSPATH_PREV"
+                fi
+            elif [ "$cur_raw" = "$M_HOOKSPATH_PREV" ]; then
+                :
+            else
+                echo "fakeai: warning: core.hooksPath changed to '$cur_raw'; leaving untouched" >&2
+                partial=1
+            fi
+        fi
+
+        if [ -n "$M_ALIAS_NAME" ] && [ "$M_ALIAS_NAME" != "NONE" ]; then
+            cur_alias=$(git config --global --get "alias.$M_ALIAS_NAME" 2>/dev/null || true)
+            if [ -n "$cur_alias" ]; then
+                if [ "$cur_alias" = "$M_ALIAS_VAL" ]; then
+                    git config --global --unset "alias.$M_ALIAS_NAME" || true
+                else
+                    echo "fakeai: warning: alias.$M_ALIAS_NAME was modified; leaving untouched" >&2
+                    partial=1
+                fi
+            fi
+        fi
+    fi
+
+    for k in $M_KEYS; do
+        git config "$scope_flag" --unset-all "$k" 2>/dev/null || true
+    done
+
+    kept_user=""
+    for uk in fakeai.name fakeai.email fakeai.off; do
+        if git config "$scope_flag" --get "$uk" >/dev/null 2>&1; then
+            kept_user="${kept_user:+$kept_user }$uk"
+        fi
+    done
+    [ -n "$kept_user" ] && echo "fakeai: note: kept user config ($kept_user)"
+
+    if [ "$M_MODE" = "global" ]; then
+        remove_verified_file "$FAKEAI_DIR/fakeai.sh" "$M_CTL_HASH" "fakeai.sh"
+        if [ -d "$M_HOOKS_DIR" ]; then
+            if ! rmdir "$M_HOOKS_DIR" 2>/dev/null; then
+                echo "fakeai: warning: $M_HOOKS_DIR not empty; leaving directory" >&2
+                partial=1
+            fi
+        fi
+        if [ "$partial" -eq 0 ]; then
+            rm -f "$manifest"
+            rmdir "$FAKEAI_DIR" 2>/dev/null || true
+            echo "fakeai: uninstalled (global)"
+        else
+            echo "fakeai: partially uninstalled; manifest kept at $manifest" >&2
+        fi
+    else
+        if [ "$partial" -eq 0 ]; then
+            rm -f "$manifest"
+            echo "fakeai: uninstalled (local)"
+        else
+            echo "fakeai: partially uninstalled; manifest kept at $manifest" >&2
+        fi
+    fi
+}
+
+main() {
+    local_mode=0
+    subcmd=""
+    while [ "$#" -gt 0 ]; do
+        case "$1" in
+            --local) local_mode=1 ;;
+            -h|--help) ctl_usage; return 0 ;;
+            -*) ctl_usage; return 2 ;;
+            *)
+                if [ -z "$subcmd" ]; then
+                    subcmd=$1
+                else
+                    ctl_usage
+                    return 2
+                fi
+                ;;
+        esac
+        shift
+    done
+
+    if [ "$local_mode" -eq 1 ]; then
+        common=$(git rev-parse --git-common-dir 2>/dev/null) || {
+            echo "fakeai: --local requires running inside a git repository" >&2
+            return 1
+        }
+        manifest="$(canon_path "$common")/fakeai-manifest"
+        scope_flag="--local"
+    else
+        manifest="$FAKEAI_DIR/manifest"
+        scope_flag="--global"
+    fi
+
+    case "$subcmd" in
+        status) cmd_status "$manifest" "$scope_flag" ;;
+        off) cmd_off "$manifest" "$scope_flag" ;;
+        *) ctl_usage; return 2 ;;
+    esac
+}
+
+main "$@"
 EOF
 }
 
