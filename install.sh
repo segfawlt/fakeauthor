@@ -468,6 +468,13 @@ read_manifest() {
     done < "$1"
 }
 
+# check_no_cr <file>: abort when a written file carries CR bytes, e.g. a CRLF checkout of install.sh.
+check_no_cr() {
+    [ "$(LC_ALL=C tr -cd '\r' < "$1" | wc -c)" -eq 0 ] && return 0
+    echo "fakeai: error: CR bytes found in $1; LF-only output required" >&2
+    exit 1
+}
+
 write_manifest() {
     cat > "$1" <<EOF
 version=1
@@ -483,6 +490,7 @@ stub_hash=$W_STUB_HASH
 ctl_hash=$W_CTL_HASH
 stubs=$W_STUBS
 EOF
+    check_no_cr "$1"
 }
 
 # write_managed <target_path> <emitter_fn> <prev_hash> <force_flag> <mode_chmod>
@@ -509,6 +517,7 @@ write_managed() {
     fi
 
     "$wm_emit" > "$wm_target"
+    check_no_cr "$wm_target"
     [ "$wm_exec" -eq 1 ] && chmod +x "$wm_target"
     WRITTEN_HASH=$(git hash-object "$wm_target")
 }
