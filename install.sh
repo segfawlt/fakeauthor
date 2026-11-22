@@ -11,6 +11,23 @@ usage: sh install.sh [--local] [--force] [persona|off|status|show <persona>]
 EOF
 }
 
+canon_path() {
+    p=${1:-}
+    [ -z "$p" ] && return 0
+    suffix=""
+    while [ ! -d "$p" ] && [ "$p" != "/" ] && [ "$p" != "." ]; do
+        b=$(basename "$p")
+        suffix="/$b$suffix"
+        p=$(dirname "$p")
+    done
+    if [ -d "$p" ]; then
+        cp=$(cd "$p" 2>/dev/null && pwd -P) || cp=$p
+        printf '%s%s\n' "${cp%/}" "$suffix"
+    else
+        printf '%s\n' "${1%/}"
+    fi
+}
+
 get_identity() {
     case "$1" in
         claude)
@@ -173,24 +190,257 @@ chain "$@"
 EOF
 }
 
-cmd_install() {
-    persona=$1
-    hook_dir="$FAKEAI_DIR/hooks"
-    mkdir -p "$hook_dir"
-    emit_hook > "$hook_dir/commit-msg"
-    chmod +x "$hook_dir/commit-msg"
-    git config --global core.hooksPath "$hook_dir"
-    git config --global fakeai.persona "$persona"
-    printf 'fakeai: installed %s\nverify: sh %s/fakeai.sh status\n' "$persona" "$FAKEAI_DIR"
+emit_ctl() {
+    cat <<'EOF'
+#!/bin/sh
+# fakeai offline control CLI (status / off)
+set -eu
+echo "fakeai: control CLI stub"
+EOF
 }
 
-case "${1:-}" in
+read_manifest() {
+    M_VERSION="" M_MODE="" M_HOOKS_DIR="" M_HOOKSPATH_PREV="UNSET" M_PERSONA=""
+    M_KEYS="" M_ALIAS_NAME="NONE" M_ALIAS_VAL="" M_HOOK_HASH="NONE"
+    M_STUB_HASH="NONE" M_CTL_HASH="NONE" M_STUBS="NONE"
+    while IFS= read -r line || [ -n "$line" ]; do
+        k=${line%%=*}
+        v=${line#*=}
+        case "$k" in
+            version) M_VERSION=$v ;;
+            mode) M_MODE=$v ;;
+            hooks_dir) M_HOOKS_DIR=$v ;;
+            hooksPath_prev) M_HOOKSPATH_PREV=$v ;;
+            persona) M_PERSONA=$v ;;
+            keys) M_KEYS=$v ;;
+            alias_name) M_ALIAS_NAME=$v ;;
+            alias_val) M_ALIAS_VAL=$v ;;
+            hook_hash) M_HOOK_HASH=$v ;;
+            stub_hash) M_STUB_HASH=$v ;;
+            ctl_hash) M_CTL_HASH=$v ;;
+            stubs) M_STUBS=$v ;;
+        esac
+    done < "$1"
+}
+
+write_manifest() {
+    cat > "$1" <<EOF
+version=1
+mode=$W_MODE
+hooks_dir=$W_HOOKS_DIR
+hooksPath_prev=$W_HOOKSPATH_PREV
+persona=$W_PERSONA
+keys=fakeai.persona fakeai.rate
+alias_name=$W_ALIAS_NAME
+alias_val=$W_ALIAS_VAL
+hook_hash=$W_HOOK_HASH
+stub_hash=$W_STUB_HASH
+ctl_hash=$W_CTL_HASH
+stubs=$W_STUBS
+EOF
+}
+
+# write_managed <target_path> <emitter_fn> <prev_hash> <force_flag> <mode_chmod>
+# Sets WRITTEN_HASH to the hash tracked in manifest.
+write_managed() {
+    wm_target=$1
+    wm_emit=$2
+    wm_prev=$3
+    wm_force=$4
+    wm_exec=$5
+
+    if [ -f "$wm_target" ] && [ -n "$wm_prev" ] && [ "$wm_prev" != "NONE" ]; then
+        wm_cur=$(git hash-object "$wm_target" 2>/dev/null || true)
+        if [ "$wm_cur" != "$wm_prev" ]; then
+            if [ "$wm_force" -eq 0 ]; then
+                echo "fakeai: warning: $(basename "$wm_target") was hand-modified; keeping existing file (use --force to overwrite)" >&2
+                WRITTEN_HASH=$wm_prev
+                return 0
+            fi
+            echo "fakeai: warning: overwriting modified $(basename "$wm_target") (--force)" >&2
+        fi
+    fi
+
+    "$wm_emit" > "$wm_target"
+    [ "$wm_exec" -eq 1 ] && chmod +x "$wm_target"
+    WRITTEN_HASH=$(git hash-object "$wm_target")
+}
+
+cmd_install_global() {
+    persona=$1
+    force=$2
+    hook_dir="$FAKEAI_DIR/hooks"
+    manifest="$FAKEAI_DIR/manifest"
+    ctl="$FAKEAI_DIR/fakeai.sh"
+    target_canon=$(canon_path "$hook_dir")
+
+    cur_raw=$(git config --global --get core.hooksPath 2>/dev/null || true)
+    cur_exp=$(git config --global --path --get core.hooksPath 2>/dev/null || true)
+
+    if [ -n "$cur_raw" ]; then
+        cur_canon=$(canon_path "$cur_exp")
+        if [ "$cur_canon" != "$target_canon" ]; then
+            echo "fakeai: global core.hooksPath is already set to '$cur_raw'; refusing to clobber (try --local)" >&2
+            exit 1
+        fi
+        if [ ! -f "$manifest" ]; then
+            echo "fakeai: $hook_dir already in core.hooksPath without fakeai manifest; refusing to clobber (try --local)" >&2
+            exit 1
+        fi
+    elif [ ! -f "$manifest" ] && [ -e "$hook_dir/commit-msg" ] && [ "$force" -eq 0 ]; then
+        echo "fakeai: $hook_dir/commit-msg exists without fakeai manifest; refusing to clobber (try --local)" >&2
+        exit 1
+    fi
+
+    if [ -f "$manifest" ]; then
+        read_manifest "$manifest"
+        W_HOOKSPATH_PREV=$M_HOOKSPATH_PREV
+        W_ALIAS_NAME=$M_ALIAS_NAME
+        W_ALIAS_VAL=$M_ALIAS_VAL
+        W_STUB_HASH=$M_STUB_HASH
+        W_STUBS=$M_STUBS
+        prev_hook_hash=$M_HOOK_HASH
+        prev_ctl_hash=$M_CTL_HASH
+    else
+        W_HOOKSPATH_PREV=UNSET
+        W_ALIAS_NAME=NONE
+        W_ALIAS_VAL=""
+        W_STUB_HASH=NONE
+        W_STUBS=NONE
+        prev_hook_hash=NONE
+        prev_ctl_hash=NONE
+    fi
+
+    mkdir -p "$hook_dir"
+    write_managed "$hook_dir/commit-msg" emit_hook "$prev_hook_hash" "$force" 1
+    W_HOOK_HASH=$WRITTEN_HASH
+    write_managed "$ctl" emit_ctl "$prev_ctl_hash" "$force" 1
+    W_CTL_HASH=$WRITTEN_HASH
+
+    git config --global core.hooksPath "$hook_dir"
+    git config --global fakeai.persona "$persona"
+    if ! git config --global --get fakeai.rate >/dev/null 2>&1; then
+        git config --global fakeai.rate 1
+    fi
+
+    W_MODE=global
+    W_HOOKS_DIR=$(canon_path "$hook_dir")
+    W_PERSONA=$persona
+    write_manifest "$manifest"
+
+    if [ "$FAKEAI_DIR" = "$HOME/.config/fakeai" ]; then
+        verify_cmd="sh ~/.config/fakeai/fakeai.sh status"
+    else
+        verify_cmd="sh $FAKEAI_DIR/fakeai.sh status"
+    fi
+    printf 'fakeai: installed %s (global)\nverify: %s\n' "$persona" "$verify_cmd"
+}
+
+cmd_install_local() {
+    persona=$1
+    force=$2
+    common=$(git rev-parse --git-common-dir 2>/dev/null) || {
+        echo "fakeai: --local requires running inside a git repository" >&2
+        exit 1
+    }
+    common_abs=$(canon_path "$common")
+
+    g_hp=$(git config --global --get core.hooksPath 2>/dev/null || true)
+    l_hp=$(git config --local --get core.hooksPath 2>/dev/null || true)
+    if [ -n "$g_hp" ] || [ -n "$l_hp" ]; then
+        echo "fakeai: core.hooksPath is already set; --local hooks would be bypassed" >&2
+        exit 1
+    fi
+
+    hook_dir="$common_abs/hooks"
+    manifest="$common_abs/fakeai-manifest"
+    if [ ! -f "$manifest" ] && [ -e "$hook_dir/commit-msg" ] && [ "$force" -eq 0 ]; then
+        echo "fakeai: foreign $hook_dir/commit-msg exists; pass --force to overwrite" >&2
+        exit 1
+    fi
+
+    if [ -f "$manifest" ]; then
+        read_manifest "$manifest"
+        prev_hook_hash=$M_HOOK_HASH
+    else
+        prev_hook_hash=NONE
+    fi
+
+    mkdir -p "$hook_dir"
+    write_managed "$hook_dir/commit-msg" emit_hook "$prev_hook_hash" "$force" 1
+    W_HOOK_HASH=$WRITTEN_HASH
+
+    git config --local fakeai.persona "$persona"
+    if ! git config --local --get fakeai.rate >/dev/null 2>&1; then
+        git config --local fakeai.rate 1
+    fi
+
+    W_MODE=local
+    W_HOOKS_DIR=$(canon_path "$hook_dir")
+    W_HOOKSPATH_PREV=UNSET
+    W_PERSONA=$persona
+    W_ALIAS_NAME=NONE
+    W_ALIAS_VAL=""
+    W_STUB_HASH=NONE
+    W_CTL_HASH=NONE
+    W_STUBS=NONE
+    write_manifest "$manifest"
+
+    printf 'fakeai: installed %s (local)\nverify: git config --local fakeai.persona\n' "$persona"
+}
+
+LOCAL=0
+FORCE=0
+POS1=""
+POS2=""
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        --local) LOCAL=1 ;;
+        --force) FORCE=1 ;;
+        -h|--help) usage; exit 0 ;;
+        -*) usage; exit 2 ;;
+        *)
+            if [ -z "$POS1" ]; then
+                POS1=$1
+            elif [ -z "$POS2" ]; then
+                POS2=$1
+            else
+                usage
+                exit 2
+            fi
+            ;;
+    esac
+    shift
+done
+
+case "$POS1" in
     show)
-        shift
-        cmd_show "$@"
+        [ "$LOCAL" -eq 0 ] && [ "$FORCE" -eq 0 ] || { usage; exit 2; }
+        cmd_show "$POS2"
+        ;;
+    "")
+        [ -n "$POS2" ] && { usage; exit 2; }
+        if [ "$LOCAL" -eq 1 ]; then
+            cmd_install_local claude "$FORCE"
+        else
+            cmd_install_global claude "$FORCE"
+        fi
         ;;
     claude|copilot|codex|cursor|aider|devin)
-        cmd_install "$1"
+        [ -n "$POS2" ] && { usage; exit 2; }
+        if [ "$LOCAL" -eq 1 ]; then
+            cmd_install_local "$POS1" "$FORCE"
+        else
+            cmd_install_global "$POS1" "$FORCE"
+        fi
+        ;;
+    status|off)
+        [ -n "$POS2" ] && { usage; exit 2; }
+        if [ "$LOCAL" -eq 1 ]; then
+            emit_ctl | FAKEAI_DIR="$FAKEAI_DIR" sh -s -- --local "$POS1"
+        else
+            emit_ctl | FAKEAI_DIR="$FAKEAI_DIR" sh -s -- "$POS1"
+        fi
         ;;
     *)
         usage
