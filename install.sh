@@ -75,6 +75,29 @@ chain() {
     exit 0
 }
 
+[ -n "${NO_FAKEAI:-}" ] && [ "$NO_FAKEAI" != "0" ] && chain "$@"
+
+off=$(git config --bool fakeai.off 2>/dev/null || true)
+[ "$off" = "true" ] && chain "$@"
+
+rate=$(git config fakeai.rate 2>/dev/null || true)
+[ -z "$rate" ] && rate=1
+case "$rate" in
+    0|0.0|0.00) chain "$@" ;;
+    1|1.0|1.00) ;;
+    *)
+        command -v awk >/dev/null 2>&1 || chain "$@"
+        awk -v p="$$" -v r="$rate" 'BEGIN{
+            if (r !~ /^([0-9]+(\.[0-9]*)?|\.[0-9]+)$/) exit 1
+            rv = r + 0
+            if (rv <= 0) exit 1
+            if (rv >= 1) exit 0
+            srand(); x = rand(); srand(int(x * 2147483647) + p)
+            exit !(rand() < rv)
+        }' || chain "$@"
+        ;;
+esac
+
 [ -f "${1:-}" ] || chain "$@"
 
 gitdir=$(git rev-parse --git-dir 2>/dev/null) || chain "$@"
