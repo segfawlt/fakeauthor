@@ -54,9 +54,9 @@ commits as the author and has no trailer.
 ## Author mode
 
 Every persona also gets a git alias of the same name. `git <persona> commit`
-runs git with that persona as the commit author, from the repository root,
-without adding a trailer. For devin this alias is the whole point, since
-author mode is the only way Devin appears on a commit.
+runs git with that persona as the commit author, preserving your current
+directory, without adding a trailer. For devin this alias is the whole point,
+since author mode is the only way Devin appears on a commit.
 
 ```sh
 git devin commit -m "ship it"
@@ -106,8 +106,8 @@ every file it writes for CR bytes and aborts if it finds any.
 
 - Many GUI git clients skip hooks entirely, with or without fakeai.
 - `git commit --no-verify` bypasses `commit-msg`, so no trailer is added.
-- `git rebase` and `git rebase --reword` rewrite old commits without running
-  `commit-msg`, so commits rewritten that way keep their original trailers.
+- Interactive `git rebase` (`reword` or `edit`) runs `commit-msg`, which may
+  add the trailer to rewritten commits.
 - CI runners commit under their own HOME and config, so a global install on
   your machine does not affect them.
 - The Python `pre-commit` tool refuses to install its hooks while a global
