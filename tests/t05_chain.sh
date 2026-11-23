@@ -7,11 +7,11 @@ set -eu
 new_sandbox
 sh "$INSTALL_SH" claude >/dev/null
 
-# Verify all 13 stubs were created and carry stub marker
+# Verify all 13 stubs were created and are executable
 for stub in applypatch-msg pre-applypatch post-applypatch pre-commit pre-merge-commit \
     prepare-commit-msg post-commit pre-rebase post-checkout post-merge pre-push \
     post-rewrite sendemail-validate; do
-    assert_eq yes "$([ -x "$HOME/.config/fakeai/hooks/$stub" ] && echo yes)" "stub $stub executable"
+    assert_eq yes "$([ -x "$HOME/.local/share/fakeauthor/hooks/$stub" ] && echo yes)" "stub $stub executable"
 done
 
 echo "init" > "$REPO/init.txt"
@@ -29,7 +29,7 @@ echo "a" > "$REPO/a.txt"
 git -C "$REPO" add a.txt
 git -C "$REPO" commit -m "chain trailers" >/dev/null
 trailers=$(git -C "$REPO" log -1 --pretty=%\(trailers\))
-assert_contains "Co-Authored-By: Claude <noreply@anthropic.com>" "$trailers" "chained commit keeps fakeai trailer"
+assert_contains "Co-Authored-By: Claude <noreply@anthropic.com>" "$trailers" "chained commit keeps fakeauthor trailer"
 assert_contains "Signed-off-by: Repo Bot <bot@example.com>" "$trailers" "chained commit runs repo commit-msg trailer"
 
 # (b) Repo commit-msg exiting 1 aborts commit; fixing restores commits
@@ -45,19 +45,19 @@ git -C "$REPO" add b.txt
 assert_fails "failing repo commit-msg aborts commit" git -C "$REPO" commit -m "should fail"
 
 # (c) Every skip path STILL chains to repo commit-msg
-git -C "$REPO" config fakeai.off true
-assert_fails "fakeai.off=true still chains to failing repo commit-msg" git -C "$REPO" commit -m "skip off"
-git -C "$REPO" config --unset fakeai.off
+git -C "$REPO" config fakeauthor.off true
+assert_fails "fakeauthor.off=true still chains to failing repo commit-msg" git -C "$REPO" commit -m "skip off"
+git -C "$REPO" config --unset fakeauthor.off
 
-assert_fails "NO_FAKEAI=1 still chains to failing repo commit-msg" env NO_FAKEAI=1 git -C "$REPO" commit -m "skip env"
+assert_fails "NO_FAKEAUTHOR=1 still chains to failing repo commit-msg" env NO_FAKEAUTHOR=1 git -C "$REPO" commit -m "skip env"
 
-git -C "$REPO" config fakeai.rate 0
-assert_fails "fakeai.rate=0 still chains to failing repo commit-msg" git -C "$REPO" commit -m "skip rate"
-git -C "$REPO" config --unset fakeai.rate
+git -C "$REPO" config fakeauthor.rate 0
+assert_fails "fakeauthor.rate=0 still chains to failing repo commit-msg" git -C "$REPO" commit -m "skip rate"
+git -C "$REPO" config --unset fakeauthor.rate
 
-git config --global fakeai.persona devin
+git config --global fakeauthor.persona devin
 assert_fails "devin still chains to failing repo commit-msg" git -C "$REPO" commit -m "skip devin"
-git config --global fakeai.persona claude
+git config --global fakeauthor.persona claude
 
 # Fix commit-msg -> commit succeeds again
 rm "$REPO/.git/hooks/commit-msg"
@@ -127,7 +127,6 @@ assert_eq yes "$([ -f "$SANDBOX/wt_hook_ran" ] && echo yes)" "worktree chains to
 assert_eq "Co-Authored-By: Claude <noreply@anthropic.com>" \
     "$(git -C "$wt" log -1 --pretty=%\(trailers\))" "worktree commit adds trailer"
 
-# Merge inside worktree creates MERGE_HEAD in worktree git-dir (not common dir) and still skips trailer
 git -C "$wt" merge --no-commit --no-ff br-merge >/dev/null
 git -C "$wt" commit -m "worktree merge" >/dev/null
 assert_eq "" "$(git -C "$wt" log -1 --pretty=%\(trailers\))" "worktree merge skips trailer via --git-dir"

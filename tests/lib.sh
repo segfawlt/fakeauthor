@@ -1,4 +1,4 @@
-# tests/lib.sh — sandbox and assertion helpers for the fakeai suite.
+# tests/lib.sh — sandbox and assertion helpers for the fakeauthor suite.
 # Sourced by tests/t*.sh; POSIX sh, safe under set -eu.
 
 HOST_HOME=$HOME
@@ -32,7 +32,7 @@ new_sandbox() {
     XDG_CONFIG_HOME=$SANDBOX/xdg
     GIT_CONFIG_NOSYSTEM=1
     export HOME XDG_CONFIG_HOME GIT_CONFIG_NOSYSTEM
-    unset GIT_CONFIG_GLOBAL FAKEAI_DIR NO_FAKEAI _FAKEAI_CHAINED
+    unset GIT_CONFIG_GLOBAL FAKEAUTHOR_DIR NO_FAKEAUTHOR _FAKEAUTHOR_CHAINED FAKEAUTHOR_TTY
     new_repo "$SANDBOX/repo"
     REPO=$SANDBOX/repo
 }

@@ -1,5 +1,5 @@
 #!/bin/sh
-# Task 4: Hook guards and knobs (rate, fakeai.off, NO_FAKEAI, CRLF, amend, -v, merge/squash).
+# Task 4: Hook guards and knobs (rate, fakeauthor.off, NO_FAKEAUTHOR, CRLF, amend, -v, merge/squash).
 
 set -eu
 . "$(dirname "$0")/lib.sh"
@@ -7,39 +7,38 @@ set -eu
 new_sandbox
 sh "$INSTALL_SH" claude >/dev/null
 
-# Initial commit in main repo and branch setup for merge/squash tests
 echo "init" > "$REPO/init.txt"
 git -C "$REPO" add init.txt
 git -C "$REPO" commit -m "init" >/dev/null
 
-# 1. fakeai.rate = 0, 1, and invalid "foo"
-git -C "$REPO" config fakeai.rate 0
+# 1. fakeauthor.rate = 0, 1, and invalid "foo"
+git -C "$REPO" config fakeauthor.rate 0
 echo "r0" > "$REPO/r0.txt"
 git -C "$REPO" add r0.txt
 git -C "$REPO" commit -m "rate 0" >/dev/null
 assert_eq "" "$(git -C "$REPO" log -1 --pretty=%\(trailers\))" "rate=0 skips trailer"
 
-git -C "$REPO" config fakeai.rate 1
+git -C "$REPO" config fakeauthor.rate 1
 echo "r1" > "$REPO/r1.txt"
 git -C "$REPO" add r1.txt
 git -C "$REPO" commit -m "rate 1" >/dev/null
 assert_eq "Co-Authored-By: Claude <noreply@anthropic.com>" \
     "$(git -C "$REPO" log -1 --pretty=%\(trailers\))" "rate=1 adds trailer"
 
-git -C "$REPO" config fakeai.rate foo
+git -C "$REPO" config fakeauthor.rate foo
 echo "rfoo" > "$REPO/rfoo.txt"
 git -C "$REPO" add rfoo.txt
 git -C "$REPO" commit -m "rate foo" >/dev/null
 assert_eq "" "$(git -C "$REPO" log -1 --pretty=%\(trailers\))" "invalid rate=foo skips cleanly"
-git -C "$REPO" config --unset fakeai.rate
+git -C "$REPO" config --unset fakeauthor.rate
 
-# 2. Repo-local fakeai.off true skips only in that repo; invalid boolean commits cleanly
+# 2. Repo-local fakeauthor.off true skips only in that repo; global true + repo false opt-in; invalid boolean commits cleanly
 new_repo "$SANDBOX/repo2"
-git -C "$REPO" config fakeai.off true
+git -C "$REPO" config fakeauthor.off true
 echo "off1" > "$REPO/off1.txt"
 git -C "$REPO" add off1.txt
 git -C "$REPO" commit -m "repo1 off" >/dev/null
-assert_eq "" "$(git -C "$REPO" log -1 --pretty=%\(trailers\))" "repo-local fakeai.off=true skips"
+assert_eq "" "$(git -C "$REPO" log -1 --pretty=%\(trailers\))" "repo-local fakeauthor.off=true skips"
 
 echo "sib" > "$SANDBOX/repo2/sib.txt"
 git -C "$SANDBOX/repo2" add sib.txt
@@ -47,30 +46,39 @@ git -C "$SANDBOX/repo2" commit -m "sibling on" >/dev/null
 assert_eq "Co-Authored-By: Claude <noreply@anthropic.com>" \
     "$(git -C "$SANDBOX/repo2" log -1 --pretty=%\(trailers\))" "sibling repo unaffected by repo-local off"
 
-git -C "$REPO" config fakeai.off maybe
+git config --global fakeauthor.off true
+git -C "$REPO" config fakeauthor.off false
+echo "optin" > "$REPO/optin.txt"
+git -C "$REPO" add optin.txt
+git -C "$REPO" commit -m "repo opt-in" >/dev/null
+assert_eq "Co-Authored-By: Claude <noreply@anthropic.com>" \
+    "$(git -C "$REPO" log -1 --pretty=%\(trailers\))" "repo-local false overrides global true"
+git config --global --unset fakeauthor.off
+
+git -C "$REPO" config fakeauthor.off maybe
 echo "maybe" > "$REPO/maybe.txt"
 git -C "$REPO" add maybe.txt
 git -C "$REPO" commit -m "invalid off maybe" >/dev/null
 assert_eq "Co-Authored-By: Claude <noreply@anthropic.com>" \
-    "$(git -C "$REPO" log -1 --pretty=%\(trailers\))" "invalid fakeai.off=maybe commits cleanly with trailer"
-git -C "$REPO" config --unset fakeai.off
+    "$(git -C "$REPO" log -1 --pretty=%\(trailers\))" "invalid fakeauthor.off=maybe commits cleanly with trailer"
+git -C "$REPO" config --unset fakeauthor.off
 
-# 3. NO_FAKEAI env var (1 and true skip; 0 does not)
+# 3. NO_FAKEAUTHOR env var (1 and true skip; 0 does not)
 echo "e1" > "$REPO/e1.txt"
 git -C "$REPO" add e1.txt
-NO_FAKEAI=1 git -C "$REPO" commit -m "env 1" >/dev/null
-assert_eq "" "$(git -C "$REPO" log -1 --pretty=%\(trailers\))" "NO_FAKEAI=1 skips"
+NO_FAKEAUTHOR=1 git -C "$REPO" commit -m "env 1" >/dev/null
+assert_eq "" "$(git -C "$REPO" log -1 --pretty=%\(trailers\))" "NO_FAKEAUTHOR=1 skips"
 
 echo "et" > "$REPO/et.txt"
 git -C "$REPO" add et.txt
-NO_FAKEAI=true git -C "$REPO" commit -m "env true" >/dev/null
-assert_eq "" "$(git -C "$REPO" log -1 --pretty=%\(trailers\))" "NO_FAKEAI=true skips"
+NO_FAKEAUTHOR=true git -C "$REPO" commit -m "env true" >/dev/null
+assert_eq "" "$(git -C "$REPO" log -1 --pretty=%\(trailers\))" "NO_FAKEAUTHOR=true skips"
 
 echo "e0" > "$REPO/e0.txt"
 git -C "$REPO" add e0.txt
-NO_FAKEAI=0 git -C "$REPO" commit -m "env 0" >/dev/null
+NO_FAKEAUTHOR=0 git -C "$REPO" commit -m "env 0" >/dev/null
 assert_eq "Co-Authored-By: Claude <noreply@anthropic.com>" \
-    "$(git -C "$REPO" log -1 --pretty=%\(trailers\))" "NO_FAKEAI=0 does not skip"
+    "$(git -C "$REPO" log -1 --pretty=%\(trailers\))" "NO_FAKEAUTHOR=0 does not skip"
 
 # 4. CRLF -F message files (plain and with existing Signed-off-by)
 printf 'crlf subject\r\n\r\nbody line\r\n' > "$SANDBOX/crlf1.txt"

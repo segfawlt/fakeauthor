@@ -1,5 +1,5 @@
 #!/bin/sh
-# Persona preset table: sh install.sh show <persona>.
+# Task 2: Persona preset table (sh install.sh show <persona>).
 
 set -eu
 . "$(dirname "$0")/lib.sh"
