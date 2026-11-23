@@ -6,7 +6,7 @@ Or maybe your workplace forced you to use Github Copilot but it is so bad you ha
 Currently only supports Linux. PRs for MacOS and Windows support are very welcome!
 
 <p align="center">
-  <img src="path/to/your-image.png" alt="Alt text" width="250">
+  <img src="docs/preview.png" alt="fakeauthor interactive picker" width="600">
 </p>
 
 
