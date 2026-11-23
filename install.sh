@@ -161,13 +161,189 @@ build_alias_val() {
     printf "!f(){ [ -n \"\$GIT_PREFIX\" ] && cd \"\$GIT_PREFIX\"; GIT_AUTHOR_NAME='%s' GIT_AUTHOR_EMAIL='%s' NO_FAKEAUTHOR=1 git \"\$@\"; };f" "$n_esc" "$e_esc"
 }
 
+TUI_ESC=$(printf '\033')
+TUI_CR=$(printf '\r')
+TUI_NL=$(printf '\nx'); TUI_NL=${TUI_NL%x}
+TUI_CTRL_C=$(printf '\003')
+TUI_OLD_STTY=""
+TUI_CURSOR_HIDDEN=0
+
 has_tty() {
     [ -n "${FAKEAUTHOR_TTY:-}" ] && [ -r "$FAKEAUTHOR_TTY" ] && return 0
     [ -t 1 ] && [ -r /dev/tty ]
 }
 
+can_raw_tui() {
+    [ -t 3 ] && [ -t 1 ] && [ "${TERM:-dumb}" != "dumb" ] || return 1
+    command -v stty >/dev/null 2>&1 && command -v dd >/dev/null 2>&1 || return 1
+    stty -g <&3 >/dev/null 2>&1
+}
+
+tui_cleanup() {
+    if [ -n "${TUI_OLD_STTY:-}" ]; then
+        stty "$TUI_OLD_STTY" <&3 2>/dev/null || true
+        TUI_OLD_STTY=""
+    fi
+    if [ "${TUI_CURSOR_HIDDEN:-0}" -eq 1 ]; then
+        printf '\033[?25h'
+        TUI_CURSOR_HIDDEN=0
+    fi
+    trap - INT TERM HUP EXIT 2>/dev/null || true
+}
+
+tui_enter() {
+    TUI_OLD_STTY=$(stty -g <&3)
+    trap 'tui_cleanup; printf "\n"; exit 130' INT TERM HUP
+    trap 'tui_cleanup' EXIT
+    stty -icanon -echo min 1 time 0 <&3
+    printf '\033[?25l'
+    TUI_CURSOR_HIDDEN=1
+}
+
+tui_read_key() {
+    b=$(dd bs=1 count=1 <&3 2>/dev/null; printf x); b=${b%x}
+    if [ -z "$b" ]; then
+        TUI_KEY="EOF"
+        return 0
+    fi
+    if [ "$b" = "$TUI_ESC" ]; then
+        stty -icanon -echo min 0 time 1 <&3 2>/dev/null || true
+        seq=$(dd bs=1 count=2 <&3 2>/dev/null; printf x); seq=${seq%x}
+        stty -icanon -echo min 1 time 0 <&3 2>/dev/null || true
+        case "$seq" in
+            "[A"|"OA") TUI_KEY="UP" ;;
+            "[B"|"OB") TUI_KEY="DOWN" ;;
+            "") TUI_KEY="ESC" ;;
+            *) TUI_KEY="OTHER" ;;
+        esac
+    elif [ "$b" = "$TUI_NL" ] || [ "$b" = "$TUI_CR" ]; then
+        TUI_KEY="ENTER"
+    elif [ "$b" = " " ]; then
+        TUI_KEY="SPACE"
+    elif [ "$b" = "$TUI_CTRL_C" ]; then
+        TUI_KEY="CTRL_C"
+    else
+        TUI_KEY="$b"
+    fi
+}
+
 mark_for() {
     if [ "$1" -eq 1 ]; then printf 'x'; else printf ' '; fi
+}
+
+tui_scope_line() {
+    sc_idx=$1
+    sc_cur=$2
+    sc_label=$3
+    if [ "$sc_idx" -eq "$sc_cur" ]; then
+        if [ -z "${NO_COLOR:-}" ]; then
+            printf '  \033[1;36m>\033[0m %s) \033[1m%s\033[0m\033[K\n' "$sc_idx" "$sc_label"
+        else
+            printf '  > %s) %s\033[K\n' "$sc_idx" "$sc_label"
+        fi
+    else
+        printf '    %s) %s\033[K\n' "$sc_idx" "$sc_label"
+    fi
+}
+
+pick_scope() {
+    ps_title=$1
+    ps_opt1=$2
+    ps_opt2=$3
+
+    if ! can_raw_tui; then
+        printf '%s\n  1) %s\n  2) %s\nChoice [1]: ' "$ps_title" "$ps_opt1" "$ps_opt2"
+        IFS= read -r sc <&3 || sc=""
+        sc=$(trim_ws "$sc")
+        case "$sc" in
+            ""|1) PICKED_SCOPE=1; return 0 ;;
+            2) PICKED_SCOPE=2; return 0 ;;
+            q|Q) return 1 ;;
+            *) echo "Unknown choice: $sc" >&2; return 2 ;;
+        esac
+    fi
+
+    tui_enter
+    sc_cur=1
+    drawn=0
+    while :; do
+        [ "$drawn" -gt 0 ] && printf '\033[%dA' "$drawn"
+        printf '%s\033[K\n' "$ps_title"
+        tui_scope_line 1 "$sc_cur" "$ps_opt1"
+        tui_scope_line 2 "$sc_cur" "$ps_opt2"
+        if [ -z "${NO_COLOR:-}" ]; then
+            printf '  \033[2mMove: arrows/j/k | Select: Enter | Cancel: q/Esc\033[0m\033[K\n'
+        else
+            printf '  Move: arrows/j/k | Select: Enter | Cancel: q/Esc\033[K\n'
+        fi
+        drawn=4
+
+        tui_read_key
+        case "$TUI_KEY" in
+            UP|k|K|DOWN|j|J)
+                if [ "$sc_cur" -eq 1 ]; then sc_cur=2; else sc_cur=1; fi
+                ;;
+            1) sc_cur=1 ;;
+            2) sc_cur=2 ;;
+            ENTER|SPACE)
+                PICKED_SCOPE=$sc_cur
+                tui_cleanup
+                return 0
+                ;;
+            q|Q|ESC|CTRL_C|EOF)
+                tui_cleanup
+                return 1
+                ;;
+        esac
+    done
+}
+
+toggle_idx() {
+    case "$1" in
+        1) sel_claude=$((1 - sel_claude)) ;;
+        2) sel_copilot=$((1 - sel_copilot)) ;;
+        3) sel_codex=$((1 - sel_codex)) ;;
+        4) sel_cursor=$((1 - sel_cursor)) ;;
+        5) sel_aider=$((1 - sel_aider)) ;;
+        6) sel_devin=$((1 - sel_devin)) ;;
+    esac
+}
+
+collect_picked() {
+    PICKED_CSV=""
+    PICKED_LIST=""
+    for p in $ALL_PERSONAS; do
+        eval "flag=\$sel_$p"
+        if [ "$flag" -eq 1 ]; then
+            PICKED_CSV="${PICKED_CSV:+$PICKED_CSV,}$p"
+            PICKED_LIST="${PICKED_LIST:+$PICKED_LIST }$p"
+        fi
+    done
+}
+
+tui_persona_line() {
+    pl_idx=$1
+    pl_cur=$2
+    pl_sel=$3
+    pl_text=$4
+    if [ "$pl_sel" -eq 1 ]; then
+        if [ -z "${NO_COLOR:-}" ]; then
+            box="\033[32m[x]\033[0m"
+        else
+            box="[x]"
+        fi
+    else
+        box="[ ]"
+    fi
+    if [ "$pl_idx" -eq "$pl_cur" ]; then
+        if [ -z "${NO_COLOR:-}" ]; then
+            printf '  \033[1;36m>\033[0m %b \033[1m%s) %s\033[0m\033[K\n' "$box" "$pl_idx" "$pl_text"
+        else
+            printf '  > %s %s) %s\033[K\n' "$box" "$pl_idx" "$pl_text"
+        fi
+    else
+        printf '    %b %s) %s\033[K\n' "$box" "$pl_idx" "$pl_text"
+    fi
 }
 
 pick_personas() {
@@ -189,6 +365,89 @@ pick_personas() {
         esac
     done
 
+    if can_raw_tui; then
+        tui_enter
+        cur=1
+        err_msg=""
+        drawn=0
+        while :; do
+            [ "$drawn" -gt 0 ] && printf '\033[%dA' "$drawn"
+            printf 'Pick co-author(s) (arrows/j/k=move, Space=toggle, a=all, n=none, Enter=save, q=cancel):\033[K\n'
+            tui_persona_line 1 "$cur" "$sel_claude"  "Claude    Co-Authored-By: Claude <noreply@anthropic.com>"
+            tui_persona_line 2 "$cur" "$sel_copilot" "Copilot   Co-authored-by: Copilot <223556219+Copilot@users.noreply.github.com>"
+            tui_persona_line 3 "$cur" "$sel_codex"   "Codex     Co-authored-by: Codex <noreply@openai.com>"
+            tui_persona_line 4 "$cur" "$sel_cursor"  "Cursor    Co-authored-by: Cursor <cursoragent@cursor.com>"
+            tui_persona_line 5 "$cur" "$sel_aider"   "aider     Co-authored-by: aider (sonnet) <aider@aider.chat>"
+            tui_persona_line 6 "$cur" "$sel_devin"   "Devin     (author mode only: git devin commit)"
+            if [ -n "$err_msg" ]; then
+                if [ -z "${NO_COLOR:-}" ]; then
+                    printf '  \033[33m%s\033[0m\033[K\n' "$err_msg"
+                else
+                    printf '  %s\033[K\n' "$err_msg"
+                fi
+            else
+                collect_picked
+                if [ -z "${NO_COLOR:-}" ]; then
+                    printf '  \033[2mSelected: %s\033[0m\033[K\n' "${PICKED_CSV:-none}"
+                else
+                    printf '  Selected: %s\033[K\n' "${PICKED_CSV:-none}"
+                fi
+            fi
+            drawn=8
+
+            tui_read_key
+            case "$TUI_KEY" in
+                UP|k|K)
+                    cur=$((cur - 1))
+                    [ "$cur" -lt 1 ] && cur=6
+                    ;;
+                DOWN|j|J)
+                    cur=$((cur + 1))
+                    [ "$cur" -gt 6 ] && cur=1
+                    ;;
+                SPACE)
+                    toggle_idx "$cur"
+                    err_msg=""
+                    ;;
+                1|2|3|4|5|6)
+                    cur=$TUI_KEY
+                    toggle_idx "$cur"
+                    err_msg=""
+                    ;;
+                a|A)
+                    if [ "$sel_claude" -eq 1 ] && [ "$sel_copilot" -eq 1 ] && [ "$sel_codex" -eq 1 ] && [ "$sel_cursor" -eq 1 ] && [ "$sel_aider" -eq 1 ]; then
+                        sel_claude=0 sel_copilot=0 sel_codex=0 sel_cursor=0 sel_aider=0
+                    else
+                        sel_claude=1 sel_copilot=1 sel_codex=1 sel_cursor=1 sel_aider=1
+                    fi
+                    err_msg=""
+                    ;;
+                n|N)
+                    sel_claude=0 sel_copilot=0 sel_codex=0 sel_cursor=0 sel_aider=0 sel_devin=0
+                    err_msg=""
+                    ;;
+                ENTER)
+                    collect_picked
+                    if [ -n "$PICKED_CSV" ]; then
+                        tui_cleanup
+                        return 0
+                    fi
+                    err_msg="Select at least one persona (Space to toggle, q to cancel)"
+                    ;;
+                q|Q|ESC|CTRL_C)
+                    tui_cleanup
+                    return 1
+                    ;;
+                EOF)
+                    collect_picked
+                    tui_cleanup
+                    [ -n "$PICKED_CSV" ] && return 0
+                    return 2
+                    ;;
+            esac
+        done
+    fi
+
     while :; do
         printf '\nPick co-author(s) (numbers to toggle, a=all, n=none, Enter=save, q=cancel):\n'
         printf '  [%s] 1) Claude    Co-Authored-By: Claude <noreply@anthropic.com>\n' "$(mark_for "$sel_claude")"
@@ -200,15 +459,7 @@ pick_personas() {
         printf 'Choice [Enter=save]: '
 
         if ! IFS= read -r line <&3; then
-            PICKED_CSV=""
-            PICKED_LIST=""
-            for p in $ALL_PERSONAS; do
-                eval "flag=\$sel_$p"
-                if [ "$flag" -eq 1 ]; then
-                    PICKED_CSV="${PICKED_CSV:+$PICKED_CSV,}$p"
-                    PICKED_LIST="${PICKED_LIST:+$PICKED_LIST }$p"
-                fi
-            done
+            collect_picked
             [ -n "$PICKED_CSV" ] && return 0
             return 2
         fi
@@ -216,15 +467,7 @@ pick_personas() {
         line=$(trim_ws "$line")
         case "$line" in
             "")
-                PICKED_CSV=""
-                PICKED_LIST=""
-                for p in $ALL_PERSONAS; do
-                    eval "flag=\$sel_$p"
-                    if [ "$flag" -eq 1 ]; then
-                        PICKED_CSV="${PICKED_CSV:+$PICKED_CSV,}$p"
-                        PICKED_LIST="${PICKED_LIST:+$PICKED_LIST }$p"
-                    fi
-                done
+                collect_picked
                 if [ -n "$PICKED_CSV" ]; then
                     return 0
                 fi
@@ -251,12 +494,7 @@ pick_personas() {
                 set -f
                 for tok in $tokens; do
                     case "$tok" in
-                        1) sel_claude=$((1 - sel_claude)) ;;
-                        2) sel_copilot=$((1 - sel_copilot)) ;;
-                        3) sel_codex=$((1 - sel_codex)) ;;
-                        4) sel_cursor=$((1 - sel_cursor)) ;;
-                        5) sel_aider=$((1 - sel_aider)) ;;
-                        6) sel_devin=$((1 - sel_devin)) ;;
+                        1|2|3|4|5|6) toggle_idx "$tok" ;;
                         *) bad_tok=$tok ;;
                     esac
                 done
@@ -562,13 +800,189 @@ build_alias_val() {
     printf "!f(){ [ -n \"\$GIT_PREFIX\" ] && cd \"\$GIT_PREFIX\"; GIT_AUTHOR_NAME='%s' GIT_AUTHOR_EMAIL='%s' NO_FAKEAUTHOR=1 git \"\$@\"; };f" "$n_esc" "$e_esc"
 }
 
+TUI_ESC=$(printf '\033')
+TUI_CR=$(printf '\r')
+TUI_NL=$(printf '\nx'); TUI_NL=${TUI_NL%x}
+TUI_CTRL_C=$(printf '\003')
+TUI_OLD_STTY=""
+TUI_CURSOR_HIDDEN=0
+
 has_tty() {
     [ -n "${FAKEAUTHOR_TTY:-}" ] && [ -r "$FAKEAUTHOR_TTY" ] && return 0
     [ -t 1 ] && [ -r /dev/tty ]
 }
 
+can_raw_tui() {
+    [ -t 3 ] && [ -t 1 ] && [ "${TERM:-dumb}" != "dumb" ] || return 1
+    command -v stty >/dev/null 2>&1 && command -v dd >/dev/null 2>&1 || return 1
+    stty -g <&3 >/dev/null 2>&1
+}
+
+tui_cleanup() {
+    if [ -n "${TUI_OLD_STTY:-}" ]; then
+        stty "$TUI_OLD_STTY" <&3 2>/dev/null || true
+        TUI_OLD_STTY=""
+    fi
+    if [ "${TUI_CURSOR_HIDDEN:-0}" -eq 1 ]; then
+        printf '\033[?25h'
+        TUI_CURSOR_HIDDEN=0
+    fi
+    trap - INT TERM HUP EXIT 2>/dev/null || true
+}
+
+tui_enter() {
+    TUI_OLD_STTY=$(stty -g <&3)
+    trap 'tui_cleanup; printf "\n"; exit 130' INT TERM HUP
+    trap 'tui_cleanup' EXIT
+    stty -icanon -echo min 1 time 0 <&3
+    printf '\033[?25l'
+    TUI_CURSOR_HIDDEN=1
+}
+
+tui_read_key() {
+    b=$(dd bs=1 count=1 <&3 2>/dev/null; printf x); b=${b%x}
+    if [ -z "$b" ]; then
+        TUI_KEY="EOF"
+        return 0
+    fi
+    if [ "$b" = "$TUI_ESC" ]; then
+        stty -icanon -echo min 0 time 1 <&3 2>/dev/null || true
+        seq=$(dd bs=1 count=2 <&3 2>/dev/null; printf x); seq=${seq%x}
+        stty -icanon -echo min 1 time 0 <&3 2>/dev/null || true
+        case "$seq" in
+            "[A"|"OA") TUI_KEY="UP" ;;
+            "[B"|"OB") TUI_KEY="DOWN" ;;
+            "") TUI_KEY="ESC" ;;
+            *) TUI_KEY="OTHER" ;;
+        esac
+    elif [ "$b" = "$TUI_NL" ] || [ "$b" = "$TUI_CR" ]; then
+        TUI_KEY="ENTER"
+    elif [ "$b" = " " ]; then
+        TUI_KEY="SPACE"
+    elif [ "$b" = "$TUI_CTRL_C" ]; then
+        TUI_KEY="CTRL_C"
+    else
+        TUI_KEY="$b"
+    fi
+}
+
 mark_for() {
     if [ "$1" -eq 1 ]; then printf 'x'; else printf ' '; fi
+}
+
+tui_scope_line() {
+    sc_idx=$1
+    sc_cur=$2
+    sc_label=$3
+    if [ "$sc_idx" -eq "$sc_cur" ]; then
+        if [ -z "${NO_COLOR:-}" ]; then
+            printf '  \033[1;36m>\033[0m %s) \033[1m%s\033[0m\033[K\n' "$sc_idx" "$sc_label"
+        else
+            printf '  > %s) %s\033[K\n' "$sc_idx" "$sc_label"
+        fi
+    else
+        printf '    %s) %s\033[K\n' "$sc_idx" "$sc_label"
+    fi
+}
+
+pick_scope() {
+    ps_title=$1
+    ps_opt1=$2
+    ps_opt2=$3
+
+    if ! can_raw_tui; then
+        printf '%s\n  1) %s\n  2) %s\nChoice [1]: ' "$ps_title" "$ps_opt1" "$ps_opt2"
+        IFS= read -r sc <&3 || sc=""
+        sc=$(trim_ws "$sc")
+        case "$sc" in
+            ""|1) PICKED_SCOPE=1; return 0 ;;
+            2) PICKED_SCOPE=2; return 0 ;;
+            q|Q) return 1 ;;
+            *) echo "Unknown choice: $sc" >&2; return 2 ;;
+        esac
+    fi
+
+    tui_enter
+    sc_cur=1
+    drawn=0
+    while :; do
+        [ "$drawn" -gt 0 ] && printf '\033[%dA' "$drawn"
+        printf '%s\033[K\n' "$ps_title"
+        tui_scope_line 1 "$sc_cur" "$ps_opt1"
+        tui_scope_line 2 "$sc_cur" "$ps_opt2"
+        if [ -z "${NO_COLOR:-}" ]; then
+            printf '  \033[2mMove: arrows/j/k | Select: Enter | Cancel: q/Esc\033[0m\033[K\n'
+        else
+            printf '  Move: arrows/j/k | Select: Enter | Cancel: q/Esc\033[K\n'
+        fi
+        drawn=4
+
+        tui_read_key
+        case "$TUI_KEY" in
+            UP|k|K|DOWN|j|J)
+                if [ "$sc_cur" -eq 1 ]; then sc_cur=2; else sc_cur=1; fi
+                ;;
+            1) sc_cur=1 ;;
+            2) sc_cur=2 ;;
+            ENTER|SPACE)
+                PICKED_SCOPE=$sc_cur
+                tui_cleanup
+                return 0
+                ;;
+            q|Q|ESC|CTRL_C|EOF)
+                tui_cleanup
+                return 1
+                ;;
+        esac
+    done
+}
+
+toggle_idx() {
+    case "$1" in
+        1) sel_claude=$((1 - sel_claude)) ;;
+        2) sel_copilot=$((1 - sel_copilot)) ;;
+        3) sel_codex=$((1 - sel_codex)) ;;
+        4) sel_cursor=$((1 - sel_cursor)) ;;
+        5) sel_aider=$((1 - sel_aider)) ;;
+        6) sel_devin=$((1 - sel_devin)) ;;
+    esac
+}
+
+collect_picked() {
+    PICKED_CSV=""
+    PICKED_LIST=""
+    for p in $ALL_PERSONAS; do
+        eval "flag=\$sel_$p"
+        if [ "$flag" -eq 1 ]; then
+            PICKED_CSV="${PICKED_CSV:+$PICKED_CSV,}$p"
+            PICKED_LIST="${PICKED_LIST:+$PICKED_LIST }$p"
+        fi
+    done
+}
+
+tui_persona_line() {
+    pl_idx=$1
+    pl_cur=$2
+    pl_sel=$3
+    pl_text=$4
+    if [ "$pl_sel" -eq 1 ]; then
+        if [ -z "${NO_COLOR:-}" ]; then
+            box="\033[32m[x]\033[0m"
+        else
+            box="[x]"
+        fi
+    else
+        box="[ ]"
+    fi
+    if [ "$pl_idx" -eq "$pl_cur" ]; then
+        if [ -z "${NO_COLOR:-}" ]; then
+            printf '  \033[1;36m>\033[0m %b \033[1m%s) %s\033[0m\033[K\n' "$box" "$pl_idx" "$pl_text"
+        else
+            printf '  > %s %s) %s\033[K\n' "$box" "$pl_idx" "$pl_text"
+        fi
+    else
+        printf '    %b %s) %s\033[K\n' "$box" "$pl_idx" "$pl_text"
+    fi
 }
 
 pick_personas() {
@@ -590,6 +1004,89 @@ pick_personas() {
         esac
     done
 
+    if can_raw_tui; then
+        tui_enter
+        cur=1
+        err_msg=""
+        drawn=0
+        while :; do
+            [ "$drawn" -gt 0 ] && printf '\033[%dA' "$drawn"
+            printf 'Pick co-author(s) (arrows/j/k=move, Space=toggle, a=all, n=none, Enter=save, q=cancel):\033[K\n'
+            tui_persona_line 1 "$cur" "$sel_claude"  "Claude    Co-Authored-By: Claude <noreply@anthropic.com>"
+            tui_persona_line 2 "$cur" "$sel_copilot" "Copilot   Co-authored-by: Copilot <223556219+Copilot@users.noreply.github.com>"
+            tui_persona_line 3 "$cur" "$sel_codex"   "Codex     Co-authored-by: Codex <noreply@openai.com>"
+            tui_persona_line 4 "$cur" "$sel_cursor"  "Cursor    Co-authored-by: Cursor <cursoragent@cursor.com>"
+            tui_persona_line 5 "$cur" "$sel_aider"   "aider     Co-authored-by: aider (sonnet) <aider@aider.chat>"
+            tui_persona_line 6 "$cur" "$sel_devin"   "Devin     (author mode only: git devin commit)"
+            if [ -n "$err_msg" ]; then
+                if [ -z "${NO_COLOR:-}" ]; then
+                    printf '  \033[33m%s\033[0m\033[K\n' "$err_msg"
+                else
+                    printf '  %s\033[K\n' "$err_msg"
+                fi
+            else
+                collect_picked
+                if [ -z "${NO_COLOR:-}" ]; then
+                    printf '  \033[2mSelected: %s\033[0m\033[K\n' "${PICKED_CSV:-none}"
+                else
+                    printf '  Selected: %s\033[K\n' "${PICKED_CSV:-none}"
+                fi
+            fi
+            drawn=8
+
+            tui_read_key
+            case "$TUI_KEY" in
+                UP|k|K)
+                    cur=$((cur - 1))
+                    [ "$cur" -lt 1 ] && cur=6
+                    ;;
+                DOWN|j|J)
+                    cur=$((cur + 1))
+                    [ "$cur" -gt 6 ] && cur=1
+                    ;;
+                SPACE)
+                    toggle_idx "$cur"
+                    err_msg=""
+                    ;;
+                1|2|3|4|5|6)
+                    cur=$TUI_KEY
+                    toggle_idx "$cur"
+                    err_msg=""
+                    ;;
+                a|A)
+                    if [ "$sel_claude" -eq 1 ] && [ "$sel_copilot" -eq 1 ] && [ "$sel_codex" -eq 1 ] && [ "$sel_cursor" -eq 1 ] && [ "$sel_aider" -eq 1 ]; then
+                        sel_claude=0 sel_copilot=0 sel_codex=0 sel_cursor=0 sel_aider=0
+                    else
+                        sel_claude=1 sel_copilot=1 sel_codex=1 sel_cursor=1 sel_aider=1
+                    fi
+                    err_msg=""
+                    ;;
+                n|N)
+                    sel_claude=0 sel_copilot=0 sel_codex=0 sel_cursor=0 sel_aider=0 sel_devin=0
+                    err_msg=""
+                    ;;
+                ENTER)
+                    collect_picked
+                    if [ -n "$PICKED_CSV" ]; then
+                        tui_cleanup
+                        return 0
+                    fi
+                    err_msg="Select at least one persona (Space to toggle, q to cancel)"
+                    ;;
+                q|Q|ESC|CTRL_C)
+                    tui_cleanup
+                    return 1
+                    ;;
+                EOF)
+                    collect_picked
+                    tui_cleanup
+                    [ -n "$PICKED_CSV" ] && return 0
+                    return 2
+                    ;;
+            esac
+        done
+    fi
+
     while :; do
         printf '\nPick co-author(s) (numbers to toggle, a=all, n=none, Enter=save, q=cancel):\n'
         printf '  [%s] 1) Claude    Co-Authored-By: Claude <noreply@anthropic.com>\n' "$(mark_for "$sel_claude")"
@@ -601,15 +1098,7 @@ pick_personas() {
         printf 'Choice [Enter=save]: '
 
         if ! IFS= read -r line <&3; then
-            PICKED_CSV=""
-            PICKED_LIST=""
-            for p in $ALL_PERSONAS; do
-                eval "flag=\$sel_$p"
-                if [ "$flag" -eq 1 ]; then
-                    PICKED_CSV="${PICKED_CSV:+$PICKED_CSV,}$p"
-                    PICKED_LIST="${PICKED_LIST:+$PICKED_LIST }$p"
-                fi
-            done
+            collect_picked
             [ -n "$PICKED_CSV" ] && return 0
             return 2
         fi
@@ -617,15 +1106,7 @@ pick_personas() {
         line=$(trim_ws "$line")
         case "$line" in
             "")
-                PICKED_CSV=""
-                PICKED_LIST=""
-                for p in $ALL_PERSONAS; do
-                    eval "flag=\$sel_$p"
-                    if [ "$flag" -eq 1 ]; then
-                        PICKED_CSV="${PICKED_CSV:+$PICKED_CSV,}$p"
-                        PICKED_LIST="${PICKED_LIST:+$PICKED_LIST }$p"
-                    fi
-                done
+                collect_picked
                 [ -n "$PICKED_CSV" ] && return 0
                 echo "Select at least one persona (or q to cancel)."
                 ;;
@@ -644,12 +1125,7 @@ pick_personas() {
                 set -f
                 for tok in $tokens; do
                     case "$tok" in
-                        1) sel_claude=$((1 - sel_claude)) ;;
-                        2) sel_copilot=$((1 - sel_copilot)) ;;
-                        3) sel_codex=$((1 - sel_codex)) ;;
-                        4) sel_cursor=$((1 - sel_cursor)) ;;
-                        5) sel_aider=$((1 - sel_aider)) ;;
-                        6) sel_devin=$((1 - sel_devin)) ;;
+                        1|2|3|4|5|6) toggle_idx "$tok" ;;
                         *) bad_tok=$tok ;;
                     esac
                 done
@@ -1006,15 +1482,21 @@ cmd_interactive() {
     exec 3<"${FAKEAUTHOR_TTY:-/dev/tty}"
     target="manifest"
     if [ "$M_MODE" = "global" ] && [ -z "$scope_override" ] && git rev-parse --git-common-dir >/dev/null 2>&1; then
-        printf '\nApply changes to:\n  1) This repo only (repo config) [default]\n  2) All repos (global)\nChoice [1]: '
-        IFS= read -r sc <&3 || sc=""
-        sc=$(trim_ws "$sc")
-        case "$sc" in
-            ""|1) target="repo_cfg" ;;
-            2) target="manifest" ;;
-            q|Q) exec 3<&-; echo "Cancelled."; return 0 ;;
-            *) exec 3<&-; echo "Unknown choice: $sc" >&2; return 1 ;;
-        esac
+        sc_rc=0
+        pick_scope "Apply changes to:" "This repo only (repo config)" "All repos (global)" || sc_rc=$?
+        if [ "$sc_rc" -eq 1 ]; then
+            exec 3<&-
+            echo "Cancelled."
+            return 0
+        elif [ "$sc_rc" -ne 0 ]; then
+            exec 3<&-
+            return 1
+        fi
+        if [ "$PICKED_SCOPE" -eq 1 ]; then
+            target="repo_cfg"
+        else
+            target="manifest"
+        fi
     fi
 
     if [ "$target" = "repo_cfg" ]; then
@@ -1463,15 +1945,21 @@ cmd_wizard() {
             repo_top=$(git rev-parse --show-toplevel 2>/dev/null || pwd)
             repo_name=$(basename "$repo_top")
             printf 'fakeauthor — fake AI co-authors for git commits (parody)\n\n'
-            printf '1) Scope (repo: %s):\n   1) All repos (global) [default]\n   2) This repo only (local .git/hooks)\nChoice [1]: ' "$repo_name"
-            IFS= read -r sc <&3 || sc=""
-            sc=$(trim_ws "$sc")
-            case "$sc" in
-                ""|1) scope_flag="global" ;;
-                2) scope_flag="local" ;;
-                q|Q) exec 3<&-; echo "Cancelled."; exit 0 ;;
-                *) exec 3<&-; echo "Unknown choice: $sc" >&2; exit 1 ;;
-            esac
+            sc_rc=0
+            pick_scope "1) Scope (repo: $repo_name):" "All repos (global)" "This repo only (local .git/hooks)" || sc_rc=$?
+            if [ "$sc_rc" -eq 1 ]; then
+                exec 3<&-
+                echo "Cancelled."
+                exit 0
+            elif [ "$sc_rc" -ne 0 ]; then
+                exec 3<&-
+                exit 1
+            fi
+            if [ "$PICKED_SCOPE" -eq 1 ]; then
+                scope_flag="global"
+            else
+                scope_flag="local"
+            fi
         else
             printf 'fakeauthor — fake AI co-authors for git commits (parody)\n'
             scope_flag="global"

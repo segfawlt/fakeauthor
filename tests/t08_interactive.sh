@@ -1,5 +1,5 @@
 #!/bin/sh
-# Task 8b: Interactive toggle picker via FAKEAUTHOR_TTY (install.sh and git fakeauthor).
+# Task 8b: Interactive toggle picker via FAKEAUTHOR_TTY (line mode) and real PTY (raw TUI).
 
 set -eu
 . "$(dirname "$0")/lib.sh"
@@ -67,3 +67,113 @@ out6=$(cd "$SANDBOX" && FAKEAUTHOR_TTY="$SANDBOX/in6" sh "$INSTALL_SH")
 assert_contains "Select at least one persona" "$out6" "empty selection prompts user again"
 assert_contains "Saved: claude,codex (global)" "$out6" "subsequent 1,3 saves claude,codex"
 assert_eq "claude,codex" "$(git config --global fakeauthor.persona)" "global persona equals claude,codex"
+
+# 7. Real PTY tests for raw-mode TUI (arrows, j/k, Space, a, Enter, Esc, Ctrl-C, stty restore)
+if command -v python3 >/dev/null 2>&1; then
+    pty_py="$SANDBOX/pty_driver.py"
+    cat > "$pty_py" <<'PY'
+import fcntl, os, pty, select, subprocess, sys, termios, time
+
+cwd = sys.argv[1]
+cmd = sys.argv[2:]
+# Sequence items separated by "::" as wait_substr=bytes_hex
+steps = []
+for item in os.environ["PTY_STEPS"].split(";;"):
+    if not item:
+        continue
+    wait_s, hex_b = item.split("==", 1)
+    steps.append((wait_s, bytes.fromhex(hex_b)))
+
+master, slave = pty.openpty()
+orig_attrs = termios.tcgetattr(slave)
+
+def attach_tty():
+    os.setsid()
+    fcntl.ioctl(0, termios.TIOCSCTTY, 0)
+
+env = os.environ.copy()
+env["TERM"] = "xterm-256color"
+env.pop("FAKEAUTHOR_TTY", None)
+
+proc = subprocess.Popen(
+    cmd,
+    cwd=cwd,
+    env=env,
+    stdin=slave,
+    stdout=slave,
+    stderr=slave,
+    close_fds=True,
+    preexec_fn=attach_tty,
+)
+os.close(slave)
+
+buf = b""
+idx = 0
+deadline = time.time() + 10.0
+while time.time() < deadline:
+    r, _, _ = select.select([master], [], [], 0.05)
+    if r:
+        try:
+            chunk = os.read(master, 4096)
+            if not chunk:
+                break
+            buf += chunk
+        except OSError:
+            break
+    if idx < len(steps):
+        wait_s, payload = steps[idx]
+        if wait_s.encode() in buf:
+            time.sleep(0.05)
+            os.write(master, payload)
+            idx += 1
+    if proc.poll() is not None and not select.select([master], [], [], 0.05)[0]:
+        break
+
+rc = proc.wait(timeout=5)
+after_attrs = termios.tcgetattr(master)
+os.close(master)
+
+want_flags = orig_attrs[3] & (termios.ECHO | termios.ICANON)
+got_flags = after_attrs[3] & (termios.ECHO | termios.ICANON)
+if want_flags != got_flags:
+    sys.stderr.write(f"PTY_STTY_NOT_RESTORED: want={want_flags} got={got_flags}\n")
+    sys.exit(99)
+
+sys.stdout.buffer.write(buf)
+sys.exit(rc)
+PY
+
+    # 7a. Fresh install inside repo: down arrow -> local, Enter, j -> copilot, Space, down arrow -> codex, Space, Enter
+    new_sandbox
+    # Scope: 1b5b420d = ESC[B + Enter; Persona: 6a201b5b42200d = 'j' + ' ' + ESC[B + ' ' + Enter
+    pty_out1=$(PTY_STEPS="1) Scope==1b5b420d;;Pick co-author(s)==6a201b5b42200d" \
+        python3 "$pty_py" "$REPO" sh "$INSTALL_SH")
+    assert_contains "Saved: claude,copilot,codex (local)" "$pty_out1" "PTY scope+persona saves claude,copilot,codex locally"
+    echo "pt1" > "$REPO/pt1.txt"
+    git -C "$REPO" add pt1.txt
+    git -C "$REPO" commit -m "pty multi" >/dev/null
+    pt1_tr=$(git -C "$REPO" log -1 --pretty=%\(trailers\))
+    assert_eq 3 "$(printf '%s\n' "$pt1_tr" | wc -l)" "PTY local commit appends 3 trailers"
+
+    # 7b. Re-run git fakeauthor in global repo: Enter (this repo), a (all 5), k (wrap to 6), k (to 5 aider), Space (toggle off), Enter
+    new_sandbox
+    sh "$INSTALL_SH" claude >/dev/null
+    # Scope Enter: 0d; Persona 'akk \r': 616b6b200d
+    pty_out2=$(PTY_STEPS="Apply changes to:==0d;;Pick co-author(s)==616b6b200d" \
+        python3 "$pty_py" "$REPO" git fakeauthor)
+    assert_contains "Saved: claude,copilot,codex,cursor (this repo)" "$pty_out2" "PTY vim wrap k unchecks aider"
+    assert_eq "claude,copilot,codex,cursor" "$(git -C "$REPO" config --local --get fakeauthor.persona)" "PTY repo-local persona updated"
+
+    # 7c. Cancel via Esc (\x1b) in PTY restores stty and writes nothing
+    new_sandbox
+    pty_out3=$(PTY_STEPS="Pick co-author(s)==1b" python3 "$pty_py" "$SANDBOX" sh "$INSTALL_SH")
+    assert_contains "Cancelled" "$pty_out3" "PTY Esc cancels cleanly"
+    assert_eq no "$([ -e "$HOME/.local/share/fakeauthor" ] && echo yes || echo no)" "PTY Esc writes nothing"
+
+    # 7d. Cancel via Ctrl-C (\x03) in PTY restores stty and writes nothing
+    new_sandbox
+    rc_ctrlc=0
+    PTY_STEPS="Pick co-author(s)==03" python3 "$pty_py" "$SANDBOX" sh "$INSTALL_SH" >/dev/null 2>&1 || rc_ctrlc=$?
+    assert_eq yes "$([ "$rc_ctrlc" -ne 0 ] && [ "$rc_ctrlc" -ne 99 ] && echo yes || echo no)" "PTY Ctrl-C aborts and restores stty (rc=$rc_ctrlc)"
+    assert_eq no "$([ -e "$HOME/.local/share/fakeauthor" ] && echo yes || echo no)" "PTY Ctrl-C writes nothing"
+fi

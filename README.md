@@ -8,7 +8,9 @@ affiliated with, endorsed by, or connected to any vendor named below.
 ## Install
 
 Run the installer with no arguments to pick your scope (global or this repo) and
-toggle one or more co-authors:
+toggle one or more co-authors (`arrows`/`j`/`k` to move, `Space` to toggle, `a`
+for all, `Enter` to save, `q`/`Esc` to cancel; falls back to numbered lines
+without a TTY):
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/<owner>/<repo>/refs/tags/v1/install.sh | sh
