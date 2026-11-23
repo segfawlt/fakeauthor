@@ -5,7 +5,8 @@ Or maybe your workplace forced you to use Github Copilot but it is so bad you ha
 
 Currently only supports Linux. PRs for MacOS and Windows support are very welcome!
 
-![fakeauthor interactive picker](docs/preview.png)
+<img src="docs/preview.png" alt="Alt text" width="500">
+
 
 ## Install (Linux)
 
