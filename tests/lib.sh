@@ -11,6 +11,7 @@ REPO=
 _SANDBOXES=
 
 _cleanup_sandboxes() {
+    cd "$ROOT_DIR" 2>/dev/null || cd /
     for sb in $_SANDBOXES; do
         rm -rf "$sb"
     done
@@ -35,6 +36,7 @@ new_sandbox() {
     unset GIT_CONFIG_GLOBAL FAKEAUTHOR_DIR NO_FAKEAUTHOR _FAKEAUTHOR_CHAINED FAKEAUTHOR_TTY
     new_repo "$SANDBOX/repo"
     REPO=$SANDBOX/repo
+    cd "$SANDBOX"
 }
 
 assert_eq() {

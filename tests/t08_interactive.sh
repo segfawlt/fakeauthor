@@ -72,11 +72,10 @@ assert_eq "claude,codex" "$(git config --global fakeauthor.persona)" "global per
 if command -v python3 >/dev/null 2>&1; then
     pty_py="$SANDBOX/pty_driver.py"
     cat > "$pty_py" <<'PY'
-import fcntl, os, pty, select, subprocess, sys, termios, time
+import fcntl, os, pty, select, struct, subprocess, sys, termios, time
 
 cwd = sys.argv[1]
 cmd = sys.argv[2:]
-# Sequence items separated by "::" as wait_substr=bytes_hex
 steps = []
 for item in os.environ["PTY_STEPS"].split(";;"):
     if not item:
@@ -85,6 +84,9 @@ for item in os.environ["PTY_STEPS"].split(";;"):
     steps.append((wait_s, bytes.fromhex(hex_b)))
 
 master, slave = pty.openpty()
+if "PTY_COLS" in os.environ:
+    cols = int(os.environ["PTY_COLS"])
+    fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 24, cols, 0, 0))
 orig_attrs = termios.tcgetattr(slave)
 
 def attach_tty():
@@ -176,4 +178,67 @@ PY
     PTY_STEPS="Pick co-author(s)==03" python3 "$pty_py" "$SANDBOX" sh "$INSTALL_SH" >/dev/null 2>&1 || rc_ctrlc=$?
     assert_eq yes "$([ "$rc_ctrlc" -ne 0 ] && [ "$rc_ctrlc" -ne 99 ] && echo yes || echo no)" "PTY Ctrl-C aborts and restores stty (rc=$rc_ctrlc)"
     assert_eq no "$([ -e "$HOME/.local/share/fakeauthor" ] && echo yes || echo no)" "PTY Ctrl-C writes nothing"
+
+    # 7e. 80x24 and 50x24 PTY redraw check: j, j, k, q leaves exactly 1 header line and restores DECAWM/cursor
+    chk_py="$SANDBOX/chk_screen.py"
+    cat > "$chk_py" <<'CHK'
+import os, sys
+cols = int(os.environ["PTY_SCREEN_COLS"])
+s = sys.stdin.read()
+if "\x1b[?7h" not in s or "\x1b[?25h" not in s:
+    sys.stderr.write("MISSING_TERMINAL_RESTORE_SEQ\n")
+    sys.exit(1)
+rows = [""] * 24
+cy, cx = 0, 0
+wrap = True
+i = 0
+while i < len(s):
+    ch = s[i]
+    if ch == "\x1b" and i + 1 < len(s) and s[i+1] == "[":
+        j = i + 2
+        while j < len(s) and not ("@" <= s[j] <= "~"):
+            j += 1
+        seq = s[i+2:j]
+        cmd = s[j] if j < len(s) else ""
+        if cmd == "A":
+            n = int(seq) if seq.isdigit() else 1
+            cy = max(0, cy - n)
+        elif cmd == "K":
+            rows[cy] = rows[cy][:cx]
+        elif seq == "?7" and cmd == "l":
+            wrap = False
+        elif seq == "?7" and cmd == "h":
+            wrap = True
+        i = j + 1
+        continue
+    elif ch == "\r":
+        cx = 0
+    elif ch == "\n":
+        cy += 1
+        if cy >= 24:
+            rows.pop(0); rows.append(""); cy = 23
+    else:
+        if cx >= cols:
+            if wrap:
+                cx = 0
+                cy += 1
+                if cy >= 24:
+                    rows.pop(0); rows.append(""); cy = 23
+            else:
+                cx = cols - 1
+        line = rows[cy]
+        if len(line) < cx:
+            line = line.ljust(cx)
+        rows[cy] = line[:cx] + ch + line[cx+1:]
+        cx += 1
+    i += 1
+print(sum("Pick co-author(s)" in r for r in rows))
+CHK
+    for cols in 80 50; do
+        new_sandbox
+        pty_screen=$(PTY_COLS="$cols" PTY_STEPS="Pick co-author(s)==6a6a6b71" \
+            python3 "$pty_py" "$SANDBOX" sh "$INSTALL_SH")
+        hdr_count=$(printf '%s' "$pty_screen" | PTY_SCREEN_COLS="$cols" python3 "$chk_py")
+        assert_eq 1 "$hdr_count" "PTY ${cols}x24 redraw keeps single header after jjkq"
+    done
 fi

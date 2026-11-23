@@ -167,6 +167,7 @@ TUI_NL=$(printf '\nx'); TUI_NL=${TUI_NL%x}
 TUI_CTRL_C=$(printf '\003')
 TUI_OLD_STTY=""
 TUI_CURSOR_HIDDEN=0
+TUI_NOWRAP=0
 
 has_tty() {
     [ -n "${FAKEAUTHOR_TTY:-}" ] && [ -r "$FAKEAUTHOR_TTY" ] && return 0
@@ -184,6 +185,10 @@ tui_cleanup() {
         stty "$TUI_OLD_STTY" <&3 2>/dev/null || true
         TUI_OLD_STTY=""
     fi
+    if [ "${TUI_NOWRAP:-0}" -eq 1 ]; then
+        printf '\033[?7h'
+        TUI_NOWRAP=0
+    fi
     if [ "${TUI_CURSOR_HIDDEN:-0}" -eq 1 ]; then
         printf '\033[?25h'
         TUI_CURSOR_HIDDEN=0
@@ -196,8 +201,9 @@ tui_enter() {
     trap 'tui_cleanup; printf "\n"; exit 130' INT TERM HUP
     trap 'tui_cleanup' EXIT
     stty -icanon -echo min 1 time 0 <&3
-    printf '\033[?25l'
+    printf '\033[?25l\033[?7l'
     TUI_CURSOR_HIDDEN=1
+    TUI_NOWRAP=1
 }
 
 tui_read_key() {
@@ -372,13 +378,13 @@ pick_personas() {
         drawn=0
         while :; do
             [ "$drawn" -gt 0 ] && printf '\033[%dA' "$drawn"
-            printf 'Pick co-author(s) (arrows/j/k=move, Space=toggle, a=all, n=none, Enter=save, q=cancel):\033[K\n'
-            tui_persona_line 1 "$cur" "$sel_claude"  "Claude    Co-Authored-By: Claude <noreply@anthropic.com>"
-            tui_persona_line 2 "$cur" "$sel_copilot" "Copilot   Co-authored-by: Copilot <223556219+Copilot@users.noreply.github.com>"
-            tui_persona_line 3 "$cur" "$sel_codex"   "Codex     Co-authored-by: Codex <noreply@openai.com>"
-            tui_persona_line 4 "$cur" "$sel_cursor"  "Cursor    Co-authored-by: Cursor <cursoragent@cursor.com>"
-            tui_persona_line 5 "$cur" "$sel_aider"   "aider     Co-authored-by: aider (sonnet) <aider@aider.chat>"
-            tui_persona_line 6 "$cur" "$sel_devin"   "Devin     (author mode only: git devin commit)"
+            printf 'Pick co-author(s) (arrows/j/k move, Space toggle, a all, Enter):\033[K\n'
+            tui_persona_line 1 "$cur" "$sel_claude"  "Claude   <noreply@anthropic.com>"
+            tui_persona_line 2 "$cur" "$sel_copilot" "Copilot  <223556219+Copilot@users.noreply.github.com>"
+            tui_persona_line 3 "$cur" "$sel_codex"   "Codex    <noreply@openai.com>"
+            tui_persona_line 4 "$cur" "$sel_cursor"  "Cursor   <cursoragent@cursor.com>"
+            tui_persona_line 5 "$cur" "$sel_aider"   "aider    <aider@aider.chat>"
+            tui_persona_line 6 "$cur" "$sel_devin"   "Devin    (author mode: git devin commit)"
             if [ -n "$err_msg" ]; then
                 if [ -z "${NO_COLOR:-}" ]; then
                     printf '  \033[33m%s\033[0m\033[K\n' "$err_msg"
@@ -388,9 +394,9 @@ pick_personas() {
             else
                 collect_picked
                 if [ -z "${NO_COLOR:-}" ]; then
-                    printf '  \033[2mSelected: %s\033[0m\033[K\n' "${PICKED_CSV:-none}"
+                    printf '  \033[2mSelected: %s (q/Esc cancel)\033[0m\033[K\n' "${PICKED_CSV:-none}"
                 else
-                    printf '  Selected: %s\033[K\n' "${PICKED_CSV:-none}"
+                    printf '  Selected: %s (q/Esc cancel)\033[K\n' "${PICKED_CSV:-none}"
                 fi
             fi
             drawn=8
@@ -432,7 +438,7 @@ pick_personas() {
                         tui_cleanup
                         return 0
                     fi
-                    err_msg="Select at least one persona (Space to toggle, q to cancel)"
+                    err_msg="Select at least one (Space to toggle, q to cancel)"
                     ;;
                 q|Q|ESC|CTRL_C)
                     tui_cleanup
@@ -806,6 +812,7 @@ TUI_NL=$(printf '\nx'); TUI_NL=${TUI_NL%x}
 TUI_CTRL_C=$(printf '\003')
 TUI_OLD_STTY=""
 TUI_CURSOR_HIDDEN=0
+TUI_NOWRAP=0
 
 has_tty() {
     [ -n "${FAKEAUTHOR_TTY:-}" ] && [ -r "$FAKEAUTHOR_TTY" ] && return 0
@@ -823,6 +830,10 @@ tui_cleanup() {
         stty "$TUI_OLD_STTY" <&3 2>/dev/null || true
         TUI_OLD_STTY=""
     fi
+    if [ "${TUI_NOWRAP:-0}" -eq 1 ]; then
+        printf '\033[?7h'
+        TUI_NOWRAP=0
+    fi
     if [ "${TUI_CURSOR_HIDDEN:-0}" -eq 1 ]; then
         printf '\033[?25h'
         TUI_CURSOR_HIDDEN=0
@@ -835,8 +846,9 @@ tui_enter() {
     trap 'tui_cleanup; printf "\n"; exit 130' INT TERM HUP
     trap 'tui_cleanup' EXIT
     stty -icanon -echo min 1 time 0 <&3
-    printf '\033[?25l'
+    printf '\033[?25l\033[?7l'
     TUI_CURSOR_HIDDEN=1
+    TUI_NOWRAP=1
 }
 
 tui_read_key() {
@@ -1011,13 +1023,13 @@ pick_personas() {
         drawn=0
         while :; do
             [ "$drawn" -gt 0 ] && printf '\033[%dA' "$drawn"
-            printf 'Pick co-author(s) (arrows/j/k=move, Space=toggle, a=all, n=none, Enter=save, q=cancel):\033[K\n'
-            tui_persona_line 1 "$cur" "$sel_claude"  "Claude    Co-Authored-By: Claude <noreply@anthropic.com>"
-            tui_persona_line 2 "$cur" "$sel_copilot" "Copilot   Co-authored-by: Copilot <223556219+Copilot@users.noreply.github.com>"
-            tui_persona_line 3 "$cur" "$sel_codex"   "Codex     Co-authored-by: Codex <noreply@openai.com>"
-            tui_persona_line 4 "$cur" "$sel_cursor"  "Cursor    Co-authored-by: Cursor <cursoragent@cursor.com>"
-            tui_persona_line 5 "$cur" "$sel_aider"   "aider     Co-authored-by: aider (sonnet) <aider@aider.chat>"
-            tui_persona_line 6 "$cur" "$sel_devin"   "Devin     (author mode only: git devin commit)"
+            printf 'Pick co-author(s) (arrows/j/k move, Space toggle, a all, Enter):\033[K\n'
+            tui_persona_line 1 "$cur" "$sel_claude"  "Claude   <noreply@anthropic.com>"
+            tui_persona_line 2 "$cur" "$sel_copilot" "Copilot  <223556219+Copilot@users.noreply.github.com>"
+            tui_persona_line 3 "$cur" "$sel_codex"   "Codex    <noreply@openai.com>"
+            tui_persona_line 4 "$cur" "$sel_cursor"  "Cursor   <cursoragent@cursor.com>"
+            tui_persona_line 5 "$cur" "$sel_aider"   "aider    <aider@aider.chat>"
+            tui_persona_line 6 "$cur" "$sel_devin"   "Devin    (author mode: git devin commit)"
             if [ -n "$err_msg" ]; then
                 if [ -z "${NO_COLOR:-}" ]; then
                     printf '  \033[33m%s\033[0m\033[K\n' "$err_msg"
@@ -1027,9 +1039,9 @@ pick_personas() {
             else
                 collect_picked
                 if [ -z "${NO_COLOR:-}" ]; then
-                    printf '  \033[2mSelected: %s\033[0m\033[K\n' "${PICKED_CSV:-none}"
+                    printf '  \033[2mSelected: %s (q/Esc cancel)\033[0m\033[K\n' "${PICKED_CSV:-none}"
                 else
-                    printf '  Selected: %s\033[K\n' "${PICKED_CSV:-none}"
+                    printf '  Selected: %s (q/Esc cancel)\033[K\n' "${PICKED_CSV:-none}"
                 fi
             fi
             drawn=8
@@ -1071,7 +1083,7 @@ pick_personas() {
                         tui_cleanup
                         return 0
                     fi
-                    err_msg="Select at least one persona (Space to toggle, q to cancel)"
+                    err_msg="Select at least one (Space to toggle, q to cancel)"
                     ;;
                 q|Q|ESC|CTRL_C)
                     tui_cleanup
