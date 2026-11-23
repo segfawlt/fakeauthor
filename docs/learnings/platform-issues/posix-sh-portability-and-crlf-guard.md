@@ -21,6 +21,7 @@ On Linux hosts where `/bin/sh` symlinks to `bash` (observed `/usr/sbin/sh -> /us
 3. Seed `awk` rate randomness with PID + `rand()` (`srand(); x=rand(); srand(int(x*2147483647)+p)`) and coerce string rate inputs (`rv = r + 0`) after regex validation so rapid commits within one second do not share identical `time(NULL)` seeds and non-numeric configs do not string-compare as true.
 4. Isolate test sandboxes by setting `HOME`, `XDG_CONFIG_HOME`, and `GIT_CONFIG_NOSYSTEM=1` (while unsetting `GIT_CONFIG_GLOBAL`) so tests never leak host `/etc/gitconfig` or `~/.local/share/fakeauthor`.
 5. For interactive POSIX `sh` prompts (`curl | sh` + regular-file `FAKEAUTHOR_TTY` tests), open input once on FD 3 (`exec 3<"${FAKEAUTHOR_TTY:-/dev/tty}"`), read with `<&3`, and close with `exec 3<&-` so multiple `read` calls advance sequentially instead of reopening from byte 0.
+6. For raw-mode TUI keys (`can_raw_tui`), read single bytes with `b=$(dd bs=1 count=1 <&3 2>/dev/null; printf x); b=${b%x}` (the trailing `x` stops command substitution from stripping `Enter` newlines), read CSI/SS3 sequences (`[A`, `OA`, `[B`, `OB`) with a `stty min 0 time 1` timeout after `ESC`, and restore `stty "$TUI_OLD_STTY"` + cursor (`\033[?25h`) in `INT`/`TERM`/`HUP`/`EXIT` traps and before closing FD 3.
 
 ## Why This Matters
 
