@@ -5,6 +5,8 @@ Or maybe your workplace forced you to use Github Copilot but it is so bad you ha
 
 Currently only supports Linux. PRs for MacOS and Windows support are very welcome!
 
+![fakeauthor interactive picker](docs/preview.png)
+
 ## Install (Linux)
 
 ```sh
@@ -16,10 +18,13 @@ curl -fsSL https://raw.githubusercontent.com/segfawlt/fakeauthor/refs/heads/main
 Global installs live in `~/.local/share/fakeauthor/` and chain existing repo
 hooks without clobbering them. `--local` installs inside `.git/` only.
 
-## Commands
+## Usage
+
+Once installed, you never need `curl` again. Run `git fakeauthor` anytime to
+re-open the menu and modify co-authors or scope:
 
 ```sh
-git fakeauthor            # open the interactive toggle menu
+git fakeauthor            # open the interactive menu to modify co-authors/scope
 git fakeauthor off        # pause in this repo (or globally outside a repo)
 git fakeauthor on         # resume in this repo (or globally outside a repo)
 git fakeauthor status     # show active state, personas, rate, and aliases
@@ -47,4 +52,4 @@ NO_FAKEAUTHOR=1 git commit -m "honest"     # skip one commit
 
 ## License
 
-GPL-3.0. See `LICENSE`.
+GPL 3.0 
