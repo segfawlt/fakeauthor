@@ -1,20 +1,16 @@
 # fakeauthor
 
-Credit AI coding assistants on commits written entirely by a human, on
-machines where those tools are never used. Parody project — not affiliated
-with, endorsed by, or connected to Anthropic, GitHub, OpenAI, Cursor, aider,
-or Cognition.
+Too poor to afford Claude? Want to impress your girl by showing you have 100 commits a day, all with "Co-author: Claude"?
+Or maybe your workplace forced you to use Github Copilot but it is so bad you have to use Codex? I got you.
+
+Currently only supports Linux. PRs for MacOS and Windows support are very welcome!
 
 ## Install (Linux)
 
 ```sh
-# Interactive picker (arrows/j/k move, Space toggle, a all, Enter save, q/Esc cancel)
+# Interactive picker 
 curl -fsSL https://raw.githubusercontent.com/segfawlt/fakeauthor/refs/heads/main/install.sh | sh
 
-# Non-interactive (single, multi, all co-authors, or this repo only)
-curl -fsSL https://raw.githubusercontent.com/segfawlt/fakeauthor/refs/heads/main/install.sh | sh -s -- claude
-curl -fsSL https://raw.githubusercontent.com/segfawlt/fakeauthor/refs/heads/main/install.sh | sh -s -- all
-curl -fsSL https://raw.githubusercontent.com/segfawlt/fakeauthor/refs/heads/main/install.sh | sh -s -- --local claude
 ```
 
 Global installs live in `~/.local/share/fakeauthor/` and chain existing repo
