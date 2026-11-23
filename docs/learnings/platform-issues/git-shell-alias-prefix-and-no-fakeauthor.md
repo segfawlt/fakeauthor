@@ -1,13 +1,14 @@
 ---
-title: Git Shell Alias GIT_PREFIX and NO_FAKEAI
+title: Git Shell Alias GIT_PREFIX and NO_FAKEAUTHOR
 category: platform-issues
 module: install.sh
 tags: [git-alias, author-mode]
 problem_type: integration-issue
 date: 2026-11-23
+last_updated: 2026-11-24
 ---
 
-# Git Shell Alias GIT_PREFIX and NO_FAKEAI
+# Git Shell Alias GIT_PREFIX and NO_FAKEAUTHOR
 
 ## Problem
 
@@ -24,15 +25,15 @@ Bare `!f(){ GIT_AUTHOR_NAME='...' GIT_AUTHOR_EMAIL='...' git "$@"; };f` without 
 
 ## Solution
 
-Restore `$GIT_PREFIX` when non-empty and set `NO_FAKEAI=1` inside `build_alias_val` in `install.sh`:
+Restore `$GIT_PREFIX` when non-empty and set `NO_FAKEAUTHOR=1` inside `build_alias_val` in `install.sh`:
 
 ```sh
-!f(){ [ -n "$GIT_PREFIX" ] && cd "$GIT_PREFIX"; GIT_AUTHOR_NAME='N' GIT_AUTHOR_EMAIL='E' NO_FAKEAI=1 git "$@"; };f
+!f(){ [ -n "$GIT_PREFIX" ] && cd "$GIT_PREFIX"; GIT_AUTHOR_NAME='N' GIT_AUTHOR_EMAIL='E' NO_FAKEAUTHOR=1 git "$@"; };f
 ```
 
 ## Why This Works
 
-Git executes `!` shell aliases from the repository worktree root and passes the caller's relative subdirectory in `GIT_PREFIX`. Changing into `$GIT_PREFIX` (terminated by `;` so empty `GIT_PREFIX` does not short-circuit) restores relative path resolution, while `NO_FAKEAI=1` suppresses trailer injection during author-mode commits.
+Git executes `!` shell aliases from the repository worktree root and passes the caller's relative subdirectory in `GIT_PREFIX`. Changing into `$GIT_PREFIX` (terminated by `;` so empty `GIT_PREFIX` does not short-circuit) restores relative path resolution, while `NO_FAKEAUTHOR=1` suppresses trailer injection during author-mode commits.
 
 ## Prevention
 
