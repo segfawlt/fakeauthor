@@ -1,7 +1,7 @@
 # fakeauthor
 
-Too poor to afford Claude? Want to impress your girl by showing you have 100 commits a day, all with "Co-author: Claude"?
-Or maybe your workplace forced you to use Github Copilot but it is so bad you have to use Codex? I got you.
+Too poor to afford Claude? Want to impress your girl by showing you have Claude Max x20 to produce 500 commits a day all with Claude co-author?
+Or your workplace forced you to use Github Copilot but it is so bad you have to use Codex? I got you.
 
 Currently only supports Linux. PRs for MacOS and Windows support are very welcome!
 
