@@ -32,7 +32,8 @@ Observed against `git 2.56.1`:
 ## Solution
 
 1. Move trailer insertion to `commit-msg` (which runs after the editor closes).
-2. Strip scissor diffs (`sed '/^[^[:space:]]* -\{1,\} >8 -\{1,\}$/,$d' "$1"`) before piping into `git stripspace --strip-comments`; if empty, skip to `chain "$@"`.
+2. Strip scissor diffs (`tr -d '\r' < "$1" | sed '/^[^[:space:]]* -\{1,\} >8 -\{1,\}$/,$d'`) before piping into `git stripspace --strip-comments`; if empty, skip to `chain "$@"`.
+   - **CRLF `commit -v` quirk (observed on `git 2.56.1`):** `git commit -v` itself fails to match `; ------------------------ >8 ------------------------\r` as a scissor line inside `cleanup_message()` even with no hooks installed, committing the diff (`rc=0`). Stripping `\r` inside `commit-msg` ensures the hook still skips trailer injection on CRLF empty `commit -v` inputs (`tests/t03_guards.sh` tests `commit` without `-v` plus direct hook invocation on a CRLF `commit -v` sample).
 3. Skip `$gitdir/MERGE_HEAD` and `$gitdir/SQUASH_MSG` using `git rev-parse --git-dir` (handles linked worktrees).
 4. Append trailers in a comma-delimited loop using `git interpret-trailers --in-place --if-exists addIfDifferent --trailer "$key: $name <$email>" "$1"` without touching `"$@"` (no `set --`).
 
