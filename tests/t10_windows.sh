@@ -104,4 +104,11 @@ if grep -qE '=.*Invoke-FakeAuthorInstall' "$ps1"; then
     echo "FAIL: install.ps1 must not assign Invoke-FakeAuthorInstall output (captures stdout and breaks TTY)" >&2
     exit 1
 fi
-assert_contains "FA_PS_SCRIPT" "$(cat "$INSTALL_SH")" "install.sh runs Windows TUI script via FA_PS_SCRIPT temp file"
+for ps_tok in 'powershell.exe' 'pwsh.exe' 'ReadKey'; do
+    if grep -q "$ps_tok" "$INSTALL_SH"; then
+        echo "FAIL: install.sh must stay pure POSIX sh without PowerShell ($ps_tok)" >&2
+        exit 1
+    fi
+done
+assert_contains "Show-PersonaPicker" "$ps1_body" "install.ps1 implements native Show-PersonaPicker"
+assert_contains "ReadKey" "$ps1_body" "install.ps1 reads console keys via ReadKey"

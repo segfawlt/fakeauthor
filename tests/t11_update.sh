@@ -67,3 +67,66 @@ new_sandbox
 fresh_up=$(FAKEAUTHOR_UPDATE_URL="file://$same_remote" sh "$INSTALL_SH" update)
 assert_contains "installed claude (global)" "$fresh_up" "update when not installed performs clean install"
 assert_contains "active (global) v0.2.0" "$(git fakeauthor status)" "fresh install via update is active"
+
+# 10. Interactive wizard reinstall from unversioned manifest displays updated notice
+new_sandbox
+sh "$INSTALL_SH" claude >/dev/null
+m_unv="$HOME/.local/share/fakeauthor/manifest"
+grep -v '^script_version=' "$m_unv" > "$m_unv.tmp" && mv "$m_unv.tmp" "$m_unv"
+printf '\n' > "$SANDBOX/wiz_in"
+wiz_out=$(FAKEAUTHOR_TTY="$SANDBOX/wiz_in" sh "$INSTALL_SH")
+assert_contains "existing install detected (unversioned)" "$wiz_out" "wizard announces existing unversioned install"
+assert_contains "fakeauthor: updated claude" "$wiz_out" "wizard displays updated notice on unversioned upgrade"
+assert_contains "Saved: claude (global)" "$wiz_out" "wizard preserves Saved line"
+
+# 11. Cached auto-update check inside git fakeauthor prints notice, writes cache, and uninstall removes cache
+new_sandbox
+sh "$INSTALL_SH" claude >/dev/null
+printf '\n' > "$SANDBOX/ctl_in"
+auto_out=$(FAKEAUTHOR_UPDATE_CHECK_FORCE=1 FAKEAUTHOR_UPDATE_URL="file://$new_remote" \
+    FAKEAUTHOR_TTY="$SANDBOX/ctl_in" git fakeauthor)
+assert_contains "update available (v0.2.0 -> v0.9.9)" "$auto_out" \
+    "git fakeauthor interactive menu displays auto-update notice"
+assert_eq yes "$([ -f "$HOME/.local/share/fakeauthor/last_update_check" ] && echo yes)" \
+    "auto-update check writes last_update_check cache"
+
+# Cached hit within 24h on real PTY serves update notice without hitting network
+if command -v python3 >/dev/null 2>&1 && python3 -c 'import fcntl, pty, termios' 2>/dev/null; then
+    pty_auto=$(FAKEAUTHOR_UPDATE_URL="file://$bad_remote" python3 -c '
+import fcntl, os, pty, select, subprocess, termios, time
+m, s = pty.openpty()
+def attach():
+    os.setsid()
+    fcntl.ioctl(0, termios.TIOCSCTTY, 0)
+env = os.environ.copy()
+env["TERM"] = "xterm-256color"
+env.pop("FAKEAUTHOR_TTY", None)
+p = subprocess.Popen(["git", "fakeauthor"], env=env, stdin=s, stdout=s, stderr=s, close_fds=True, preexec_fn=attach)
+os.close(s)
+buf = b""
+sent = False
+deadline = time.time() + 5
+while time.time() < deadline:
+    r, _, _ = select.select([m], [], [], 0.05)
+    if r:
+        try: chunk = os.read(m, 4096)
+        except OSError: break
+        if not chunk: break
+        buf += chunk
+        if not sent and b"Pick co-author" in buf:
+            time.sleep(0.05)
+            os.write(m, b"q")
+            sent = True
+    if p.poll() is not None and not select.select([m], [], [], 0.05)[0]:
+        break
+p.wait(timeout=5)
+os.close(m)
+print(buf.decode("utf-8", "replace"))
+')
+    assert_contains "update available (v0.2.0 -> v0.9.9)" "$pty_auto" \
+        "24h cache serves update notice without hitting network"
+fi
+
+git fakeauthor uninstall >/dev/null
+assert_eq no "$([ -e "$HOME/.local/share/fakeauthor" ] && echo yes || echo no)" \
+    "uninstall removes last_update_check and ~/.local/share/fakeauthor cleanly"
