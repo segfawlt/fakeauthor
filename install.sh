@@ -241,7 +241,9 @@ can_win_ps_tui() {
     [ "$IS_WINDOWS" -eq 1 ] && [ -z "${FAKEAUTHOR_TTY:-}" ] && [ -t 0 ] && [ -t 1 ] || return 1
     case "$(tty <&3 2>/dev/null || true)" in
         /dev/cons*) ;;
-        *) return 1 ;;
+        *)
+            [ -z "${MSYSTEM:-}" ] || [ "${TERM:-dumb}" = "dumb" ] || return 1
+            ;;
     esac
     command -v cygpath >/dev/null 2>&1 || return 1
     find_win_ps >/dev/null 2>&1
@@ -251,7 +253,9 @@ win_ps_run() {
     ps_bin=$(find_win_ps) || return 2
     ps_out=$(mktemp 2>/dev/null) || return 2
     ps_out_win=$(cygpath -w "$ps_out" 2>/dev/null) || { rm -f "$ps_out"; return 2; }
-    ps_code=$(cat <<'PS_EOF'
+    ps_script=$(mktemp 2>/dev/null) || { rm -f "$ps_out"; return 2; }
+    ps_script_win=$(cygpath -w "$ps_script" 2>/dev/null) || { rm -f "$ps_out" "$ps_script"; return 2; }
+    cat > "$ps_script" <<'PS_EOF'
 $ErrorActionPreference = 'Stop'
 if ([Console]::IsInputRedirected -or [Console]::IsOutputRedirected) { exit 2 }
 $mode = $env:FA_PS_MODE
@@ -446,14 +450,14 @@ try {
   try { [Console]::CursorVisible = $oldVis } catch {}
 }
 PS_EOF
-)
     ps_rc=0
-    MSYS_NO_PATHCONV=1 FA_PS_OUT="$ps_out_win" "$ps_bin" -NoProfile -Command "$ps_code" <&3 || ps_rc=$?
+    MSYS_NO_PATHCONV=1 FA_PS_OUT="$ps_out_win" FA_PS_SCRIPT="$ps_script_win" \
+        "$ps_bin" -NoProfile -Command 'Invoke-Expression ([IO.File]::ReadAllText($env:FA_PS_SCRIPT))' || ps_rc=$?
     WIN_PS_VAL=""
     if [ "$ps_rc" -eq 0 ] && [ -f "$ps_out" ]; then
         WIN_PS_VAL=$(tr -d '\r\n' < "$ps_out")
     fi
-    rm -f "$ps_out"
+    rm -f "$ps_out" "$ps_script"
     return "$ps_rc"
 }
 
@@ -1259,7 +1263,9 @@ can_win_ps_tui() {
     [ "$IS_WINDOWS" -eq 1 ] && [ -z "${FAKEAUTHOR_TTY:-}" ] && [ -t 0 ] && [ -t 1 ] || return 1
     case "$(tty <&3 2>/dev/null || true)" in
         /dev/cons*) ;;
-        *) return 1 ;;
+        *)
+            [ -z "${MSYSTEM:-}" ] || [ "${TERM:-dumb}" = "dumb" ] || return 1
+            ;;
     esac
     command -v cygpath >/dev/null 2>&1 || return 1
     find_win_ps >/dev/null 2>&1
@@ -1269,7 +1275,9 @@ win_ps_run() {
     ps_bin=$(find_win_ps) || return 2
     ps_out=$(mktemp 2>/dev/null) || return 2
     ps_out_win=$(cygpath -w "$ps_out" 2>/dev/null) || { rm -f "$ps_out"; return 2; }
-    ps_code=$(cat <<'PS_EOF'
+    ps_script=$(mktemp 2>/dev/null) || { rm -f "$ps_out"; return 2; }
+    ps_script_win=$(cygpath -w "$ps_script" 2>/dev/null) || { rm -f "$ps_out" "$ps_script"; return 2; }
+    cat > "$ps_script" <<'PS_EOF'
 $ErrorActionPreference = 'Stop'
 if ([Console]::IsInputRedirected -or [Console]::IsOutputRedirected) { exit 2 }
 $mode = $env:FA_PS_MODE
@@ -1464,14 +1472,14 @@ try {
   try { [Console]::CursorVisible = $oldVis } catch {}
 }
 PS_EOF
-)
     ps_rc=0
-    MSYS_NO_PATHCONV=1 FA_PS_OUT="$ps_out_win" "$ps_bin" -NoProfile -Command "$ps_code" <&3 || ps_rc=$?
+    MSYS_NO_PATHCONV=1 FA_PS_OUT="$ps_out_win" FA_PS_SCRIPT="$ps_script_win" \
+        "$ps_bin" -NoProfile -Command 'Invoke-Expression ([IO.File]::ReadAllText($env:FA_PS_SCRIPT))' || ps_rc=$?
     WIN_PS_VAL=""
     if [ "$ps_rc" -eq 0 ] && [ -f "$ps_out" ]; then
         WIN_PS_VAL=$(tr -d '\r\n' < "$ps_out")
     fi
-    rm -f "$ps_out"
+    rm -f "$ps_out" "$ps_script"
     return "$ps_rc"
 }
 

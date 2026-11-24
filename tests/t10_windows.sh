@@ -100,3 +100,8 @@ case "$first_code" in
         exit 1
         ;;
 esac
+if grep -qE '=.*Invoke-FakeAuthorInstall' "$ps1"; then
+    echo "FAIL: install.ps1 must not assign Invoke-FakeAuthorInstall output (captures stdout and breaks TTY)" >&2
+    exit 1
+fi
+assert_contains "FA_PS_SCRIPT" "$(cat "$INSTALL_SH")" "install.sh runs Windows TUI script via FA_PS_SCRIPT temp file"

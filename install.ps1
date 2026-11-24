@@ -47,17 +47,20 @@ function Find-GitBash {
 function Invoke-FakeAuthorInstall {
   param([string[]]$ArgsList = @())
 
+  $script:FaRc = 0
   $gitCmd = Get-Command git -ErrorAction SilentlyContinue
   if ($null -eq $gitCmd) {
     [Console]::Error.WriteLine('fakeauthor: git not found on PATH. Install Git for Windows: https://git-scm.com/download/win')
-    return 1
+    $script:FaRc = 1
+    return
   }
   $gitBin = if (-not [string]::IsNullOrWhiteSpace($gitCmd.Source)) { $gitCmd.Source } else { 'git' }
 
   $shExe = Find-GitBash -GitCmd $gitCmd
   if ([string]::IsNullOrWhiteSpace($shExe)) {
     [Console]::Error.WriteLine('fakeauthor: Git for Windows bundled sh.exe not found. Install/repair Git for Windows: https://git-scm.com/download/win')
-    return 1
+    $script:FaRc = 1
+    return
   }
 
   $hadHome = Test-Path Env:HOME
@@ -101,7 +104,8 @@ function Invoke-FakeAuthorInstall {
 
     if ([string]::IsNullOrEmpty($raw)) {
       [Console]::Error.WriteLine('fakeauthor: failed to load install.sh')
-      return 1
+      $script:FaRc = 1
+      return
     }
 
     $raw = ($raw -replace "`r`n", "`n") -replace "`r", ""
@@ -113,8 +117,7 @@ function Invoke-FakeAuthorInstall {
     } else {
       & $shExe $tmpSh
     }
-    if ($null -eq $LASTEXITCODE) { return 0 }
-    return [int]$LASTEXITCODE
+    $script:FaRc = if ($null -eq $LASTEXITCODE) { 0 } else { [int]$LASTEXITCODE }
   } finally {
     if ($null -ne $tmpSh -and (Test-Path -LiteralPath $tmpSh)) {
       Remove-Item -LiteralPath $tmpSh -Force -ErrorAction SilentlyContinue
@@ -127,12 +130,13 @@ function Invoke-FakeAuthorInstall {
   }
 }
 
-$faRc = if ($CliArgs.Count -gt 0) {
+$script:FaRc = 0
+if ($CliArgs.Count -gt 0) {
   Invoke-FakeAuthorInstall -ArgsList $CliArgs
 } else {
   Invoke-FakeAuthorInstall
 }
-$global:LASTEXITCODE = $faRc
+$global:LASTEXITCODE = $script:FaRc
 if ($null -ne $MyInvocation.MyCommand -and $MyInvocation.MyCommand.CommandType -eq 'ExternalScript' -and -not [string]::IsNullOrEmpty($PSCommandPath)) {
-  exit $faRc
+  exit $script:FaRc
 }

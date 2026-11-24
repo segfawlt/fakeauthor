@@ -90,8 +90,10 @@ try {
   Set-Location $sandbox
 
   # 1. Global install via install.ps1 with multi-persona
-  & $InstallPs1 claude,codex
+  $instOut = (& $InstallPs1 claude,codex) -join "`n"
   Assert-Eq '0' ([string]$LASTEXITCODE) 'install.ps1 claude,codex exits 0'
+  Assert-Contains 'fakeauthor: installed claude,codex (global)' $instOut 'install.ps1 emits installer status output'
+  Assert-Contains 'verify: git fakeauthor status' $instOut 'install.ps1 emits verify hint'
 
   $faDir = Join-Path $homeDir '.local\share\fakeauthor'
   Assert-LfNoBom (Join-Path $faDir 'hooks\commit-msg') 'generated commit-msg is LF without BOM'
