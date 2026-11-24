@@ -1,7 +1,9 @@
 # fakeauthor
 
 Too poor to afford Claude? Want to impress your girl by showing you have 100 commits a day, all with "Co-author: Claude"?
-Or maybe your workplace forced you to use Github Copilot but it is so bad you have to use Codex? I got you.
+Or maybe your workplace forced you to use Github Copilot but it is so bad you have to use Codex? 
+
+This project will help you adding imaginary co-author (Claude, Codex,...) on your commit.
 
 Currently only supports Linux. PRs for MacOS and Windows support are very welcome!
 
