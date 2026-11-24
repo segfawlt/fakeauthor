@@ -5,19 +5,29 @@ Or maybe your workplace forced you to use Github Copilot but it is so bad you ha
 
 This project will help you adding imaginary co-author (Claude, Codex,...) on your commit.
 
-Currently only supports Linux. PRs for MacOS and Windows support are very welcome!
+Supports Linux and Windows (Git for Windows). PRs for macOS are welcome!
 
 <p align="center">
   <img src="docs/preview.png" alt="fakeauthor interactive picker" width="600">
 </p>
 
 
-## Install (Linux)
+## Install
+
+### Linux / Git Bash
 
 ```sh
-# Interactive picker 
+# Interactive picker
 curl -fsSL https://raw.githubusercontent.com/segfawlt/fakeauthor/refs/heads/main/install.sh | sh
+```
 
+### Windows (PowerShell)
+
+Requires [Git for Windows](https://git-scm.com/download/win).
+
+```powershell
+# Interactive picker
+irm https://raw.githubusercontent.com/segfawlt/fakeauthor/refs/heads/main/install.ps1 | iex
 ```
 
 Global installs live in `~/.local/share/fakeauthor/` and chain existing repo
@@ -44,8 +54,9 @@ only). Tune anytime via `git config` without reinstalling:
 
 ```sh
 git config fakeauthor.persona claude,codex
-git config --global fakeauthor.rate 0.25   # chaos mode (25% of commits)
-NO_FAKEAUTHOR=1 git commit -m "honest"     # skip one commit
+git config --global fakeauthor.rate 0.25               # chaos mode (25% of commits)
+NO_FAKEAUTHOR=1 git commit -m "honest"                 # skip one commit (sh/bash)
+git -c fakeauthor.off=true commit -m "honest"          # skip one commit (cross-shell / PowerShell)
 ```
 
 ## Known Limits

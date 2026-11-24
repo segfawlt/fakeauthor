@@ -1,0 +1,34 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run POSIX sh test suite
+        run: sh tests/run.sh
+      - name: Run shellcheck if available
+        run: |
+          if command -v shellcheck >/dev/null 2>&1; then
+            shellcheck -s sh install.sh tests/*.sh
+          fi
+
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run POSIX sh test suite via Git Bash
+        shell: pwsh
+        run: |
+          & "C:\Program Files\Git\bin\sh.exe" tests/run.sh
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Run PowerShell tests (Windows PowerShell 5.1)
+        shell: powershell
+        run: powershell -NoProfile -ExecutionPolicy Bypass -File tests/test_windows.ps1
+      - name: Run PowerShell tests (PowerShell 7)
+        shell: pwsh
+        run: pwsh -NoProfile -File tests/test_windows.ps1

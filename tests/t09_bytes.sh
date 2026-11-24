@@ -4,12 +4,14 @@
 set -eu
 . "$(dirname "$0")/lib.sh"
 
-# .gitattributes exists and pins LF for shell scripts
+# .gitattributes exists and pins LF for shell and PowerShell scripts
 assert_eq yes "$([ -f "$ROOT_DIR/.gitattributes" ] && echo yes)" ".gitattributes exists"
 assert_contains "*.sh text eol=lf" "$(cat "$ROOT_DIR/.gitattributes")" ".gitattributes pins LF for .sh files"
+assert_contains "*.ps1 text eol=lf" "$(cat "$ROOT_DIR/.gitattributes")" ".gitattributes pins LF for .ps1 files"
 
-# Repo shell scripts contain zero CR bytes
-for f in "$INSTALL_SH" "$ROOT_DIR"/tests/*.sh; do
+# Repo shell and PowerShell scripts contain zero CR bytes
+for f in "$INSTALL_SH" "$ROOT_DIR/install.ps1" "$ROOT_DIR"/tests/*.sh "$ROOT_DIR/tests/test_windows.ps1"; do
+    assert_eq yes "$([ -f "$f" ] && echo yes)" "script exists: $f"
     assert_zero_cr "$f" "repo script has no CR bytes: $f"
 done
 
@@ -45,6 +47,13 @@ for f in "$INSTALL_SH" "$ROOT_DIR"/tests/*.sh; do
         echo "FAIL: double bracket bashism found in $f" >&2
         exit 1
     fi
+    if grep -qi "$old_name" "$f"; then
+        echo "FAIL: leftover $old_name reference found in $f" >&2
+        exit 1
+    fi
+done
+
+for f in "$ROOT_DIR/install.ps1" "$ROOT_DIR/tests/test_windows.ps1"; do
     if grep -qi "$old_name" "$f"; then
         echo "FAIL: leftover $old_name reference found in $f" >&2
         exit 1

@@ -3,7 +3,21 @@
 
 set -eu
 
-FAKEAUTHOR_DIR="${FAKEAUTHOR_DIR:-$HOME/.local/share/fakeauthor}"
+IS_WINDOWS=0
+case "$(uname -s 2>/dev/null || true)" in
+    MINGW*|MSYS*|CYGWIN*) IS_WINDOWS=1 ;;
+esac
+CR_CH=$(printf '\r')
+
+norm_slashes() {
+    case "$1" in
+        *\\*) printf '%s\n' "$1" | tr '\\' '/' ;;
+        *) printf '%s\n' "$1" ;;
+    esac
+}
+
+DEFAULT_FAKEAUTHOR_DIR=$(norm_slashes "$HOME/.local/share/fakeauthor")
+FAKEAUTHOR_DIR=$(norm_slashes "${FAKEAUTHOR_DIR:-$DEFAULT_FAKEAUTHOR_DIR}")
 STUB_HOOKS="applypatch-msg pre-applypatch post-applypatch pre-commit pre-merge-commit prepare-commit-msg post-commit pre-rebase post-checkout post-merge pre-push post-rewrite sendemail-validate"
 ALL_PERSONAS="claude copilot codex cursor aider devin"
 
@@ -16,24 +30,50 @@ EOF
 canon_path() {
     p=${1:-}
     [ -z "$p" ] && return 0
+    p=$(norm_slashes "$p")
+    orig_p=$p
     suffix=""
     while [ ! -d "$p" ] && [ "$p" != "/" ] && [ "$p" != "." ]; do
+        case "$p" in [A-Za-z]:|[A-Za-z]:/) break ;; esac
+        parent=$(dirname "$p")
+        case "$parent" in [A-Za-z]:) parent="$parent/" ;; esac
+        [ "$parent" = "$p" ] && break
         b=$(basename "$p")
         suffix="/$b$suffix"
-        p=$(dirname "$p")
+        p=$parent
     done
     if [ -d "$p" ]; then
         cp=$(cd "$p" 2>/dev/null && pwd -P) || cp=$p
         printf '%s%s\n' "${cp%/}" "$suffix"
     else
-        printf '%s\n' "${1%/}"
+        printf '%s\n' "${orig_p%/}"
+    fi
+}
+
+same_path() {
+    sp_a=$(canon_path "$1")
+    sp_b=$(canon_path "$2")
+    [ "$sp_a" = "$sp_b" ] && return 0
+    if [ "$IS_WINDOWS" -eq 1 ]; then
+        sp_a=$(printf '%s' "$sp_a" | tr '[:upper:]' '[:lower:]')
+        sp_b=$(printf '%s' "$sp_b" | tr '[:upper:]' '[:lower:]')
+        [ "$sp_a" = "$sp_b" ] && return 0
+    fi
+    return 1
+}
+
+to_git_path() {
+    if [ "$IS_WINDOWS" -eq 1 ] && command -v cygpath >/dev/null 2>&1; then
+        cygpath -m "$1" 2>/dev/null || printf '%s\n' "$1"
+    else
+        printf '%s\n' "$1"
     fi
 }
 
 trim_ws() {
     t=$1
-    while [ "${t# }" != "$t" ] || [ "${t#	}" != "$t" ]; do t=${t#?}; done
-    while [ "${t% }" != "$t" ] || [ "${t%	}" != "$t" ]; do t=${t%?}; done
+    while [ "${t# }" != "$t" ] || [ "${t#	}" != "$t" ] || [ "${t#"$CR_CH"}" != "$t" ]; do t=${t#?}; done
+    while [ "${t% }" != "$t" ] || [ "${t%	}" != "$t" ] || [ "${t%"$CR_CH"}" != "$t" ]; do t=${t%?}; done
     printf '%s' "$t"
 }
 
@@ -171,13 +211,299 @@ TUI_NOWRAP=0
 
 has_tty() {
     [ -n "${FAKEAUTHOR_TTY:-}" ] && [ -r "$FAKEAUTHOR_TTY" ] && return 0
-    [ -t 1 ] && [ -r /dev/tty ]
+    [ -t 1 ] && { [ -r /dev/tty ] || { [ "$IS_WINDOWS" -eq 1 ] && [ -t 0 ]; }; }
 }
 
 can_raw_tui() {
     [ -t 3 ] && [ -t 1 ] && [ "${TERM:-dumb}" != "dumb" ] || return 1
+    if [ "$IS_WINDOWS" -eq 1 ]; then
+        case "$(tty <&3 2>/dev/null || true)" in
+            /dev/cons*) return 1 ;;
+        esac
+    fi
     command -v stty >/dev/null 2>&1 && command -v dd >/dev/null 2>&1 || return 1
     stty -g <&3 >/dev/null 2>&1
+}
+
+find_win_ps() {
+    if command -v pwsh.exe >/dev/null 2>&1; then
+        command -v pwsh.exe
+    elif command -v powershell.exe >/dev/null 2>&1; then
+        command -v powershell.exe
+    elif [ -x "/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe" ]; then
+        printf '%s\n' "/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe"
+    else
+        return 1
+    fi
+}
+
+can_win_ps_tui() {
+    [ "$IS_WINDOWS" -eq 1 ] && [ -z "${FAKEAUTHOR_TTY:-}" ] && [ -t 0 ] && [ -t 1 ] || return 1
+    case "$(tty <&3 2>/dev/null || true)" in
+        /dev/cons*) ;;
+        *) return 1 ;;
+    esac
+    command -v cygpath >/dev/null 2>&1 || return 1
+    find_win_ps >/dev/null 2>&1
+}
+
+win_ps_run() {
+    ps_bin=$(find_win_ps) || return 2
+    ps_out=$(mktemp 2>/dev/null) || return 2
+    ps_out_win=$(cygpath -w "$ps_out" 2>/dev/null) || { rm -f "$ps_out"; return 2; }
+    ps_code=$(cat <<'PS_EOF'
+$ErrorActionPreference = 'Stop'
+if ([Console]::IsInputRedirected -or [Console]::IsOutputRedirected) { exit 2 }
+$mode = $env:FA_PS_MODE
+$outPath = $env:FA_PS_OUT
+$noColor = -not [string]::IsNullOrEmpty($env:NO_COLOR)
+$oldVis = $true
+$oldCtrlC = $false
+try { $oldVis = [Console]::CursorVisible } catch {}
+try { $oldCtrlC = [Console]::TreatControlCAsInput } catch {}
+
+function Write-Seg($txt, $fg) {
+  if ($noColor -or $null -eq $fg) {
+    [Console]::Write($txt)
+  } else {
+    $prev = [Console]::ForegroundColor
+    [Console]::ForegroundColor = $fg
+    [Console]::Write($txt)
+    [Console]::ForegroundColor = $prev
+  }
+}
+
+function Pad-End($used, $bw) {
+  $rem = $bw - $used
+  if ($rem -gt 0) { [Console]::Write((' ' * $rem)) }
+  [Console]::Write("`n")
+}
+
+try {
+  try { [Console]::CursorVisible = $false } catch {}
+  try { [Console]::TreatControlCAsInput = $true } catch {}
+  if ([Console]::CursorLeft -gt 0) { [Console]::Write("`n") }
+
+  if ($mode -eq 'scope') {
+    $title = $env:FA_PS_TITLE
+    $opts = @($env:FA_PS_OPT1, $env:FA_PS_OPT2)
+    $cur = 0
+    $n = 4
+    for ($i = 0; $i -lt $n; $i++) { [Console]::Write("`n") }
+    $baseTop = [Math]::Max(0, [Console]::CursorTop - $n)
+    while ($true) {
+      $bw = 80
+      try { $bw = [Math]::Max(20, [Console]::BufferWidth - 1) } catch {}
+      [Console]::SetCursorPosition(0, $baseTop)
+      $t = if ($title.Length -gt $bw) { $title.Substring(0, $bw) } else { $title }
+      Write-Seg $t $null
+      Pad-End $t.Length $bw
+      for ($i = 0; $i -lt 2; $i++) {
+        $num = [string]($i + 1)
+        $lbl = $opts[$i]
+        if ($i -eq $cur) {
+          $pre = '  > '
+          $rest = "$num) $lbl"
+          $maxRest = [Math]::Max(0, $bw - $pre.Length)
+          if ($rest.Length -gt $maxRest) { $rest = $rest.Substring(0, $maxRest) }
+          Write-Seg '  ' $null
+          Write-Seg '>' ([ConsoleColor]::Cyan)
+          Write-Seg ' ' $null
+          Write-Seg $rest $null
+          Pad-End ($pre.Length + $rest.Length) $bw
+        } else {
+          $line = "    $num) $lbl"
+          if ($line.Length -gt $bw) { $line = $line.Substring(0, $bw) }
+          Write-Seg $line $null
+          Pad-End $line.Length $bw
+        }
+      }
+      $hint = '  Move: arrows/j/k | Select: Enter | Cancel: q/Esc'
+      if ($hint.Length -gt $bw) { $hint = $hint.Substring(0, $bw) }
+      Write-Seg $hint ([ConsoleColor]::DarkGray)
+      Pad-End $hint.Length $bw
+
+      $k = [Console]::ReadKey($true)
+      $ch = [string]$k.KeyChar
+      $isCtrlC = ([int]$k.KeyChar -eq 3) -or (($k.Modifiers -band [ConsoleModifiers]::Control) -and ($k.Key -eq [ConsoleKey]::C))
+      if ($isCtrlC -or $k.Key -eq [ConsoleKey]::Escape -or $ch -ieq 'q') {
+        [Console]::SetCursorPosition(0, [Math]::Min([Console]::BufferHeight - 1, $baseTop + $n))
+        exit 1
+      } elseif ($k.Key -eq [ConsoleKey]::UpArrow -or $k.Key -eq [ConsoleKey]::DownArrow -or $ch -ieq 'j' -or $ch -ieq 'k') {
+        $cur = 1 - $cur
+      } elseif ($ch -eq '1') {
+        $cur = 0
+      } elseif ($ch -eq '2') {
+        $cur = 1
+      } elseif ($k.Key -eq [ConsoleKey]::Enter -or $k.Key -eq [ConsoleKey]::Spacebar -or $ch -eq ' ') {
+        [IO.File]::WriteAllText($outPath, [string]($cur + 1), (New-Object System.Text.UTF8Encoding($false)))
+        [Console]::SetCursorPosition(0, [Math]::Min([Console]::BufferHeight - 1, $baseTop + $n))
+        exit 0
+      }
+    }
+  } else {
+    $names = @('claude','copilot','codex','cursor','aider','devin')
+    $labels = @(
+      'Claude   <noreply@anthropic.com>',
+      'Copilot  <223556219+Copilot@users.noreply.github.com>',
+      'Codex    <noreply@openai.com>',
+      'Cursor   <cursoragent@cursor.com>',
+      'aider    <aider@aider.chat>',
+      'Devin    (author mode: git devin commit)'
+    )
+    $sel = [bool[]]@($false,$false,$false,$false,$false,$false)
+    foreach ($item in ($env:FA_PS_INIT -split ',')) {
+      $t = $item.Trim()
+      if ($t -eq 'all') {
+        for ($i = 0; $i -lt 5; $i++) { $sel[$i] = $true }
+      } else {
+        $idx = [Array]::IndexOf($names, $t)
+        if ($idx -ge 0) { $sel[$idx] = $true }
+      }
+    }
+    $cur = 0
+    $errMsg = ''
+    $n = 8
+    for ($i = 0; $i -lt $n; $i++) { [Console]::Write("`n") }
+    $baseTop = [Math]::Max(0, [Console]::CursorTop - $n)
+    while ($true) {
+      $bw = 80
+      try { $bw = [Math]::Max(20, [Console]::BufferWidth - 1) } catch {}
+      [Console]::SetCursorPosition(0, $baseTop)
+      $hdr = 'Pick co-author(s) (arrows/j/k move, Space toggle, a all, Enter):'
+      if ($hdr.Length -gt $bw) { $hdr = $hdr.Substring(0, $bw) }
+      Write-Seg $hdr $null
+      Pad-End $hdr.Length $bw
+      for ($i = 0; $i -lt 6; $i++) {
+        $num = [string]($i + 1)
+        $box = if ($sel[$i]) { '[x]' } else { '[ ]' }
+        $lbl = $labels[$i]
+        $prefixLen = 8
+        $rest = "$num) $lbl"
+        $maxRest = [Math]::Max(0, $bw - $prefixLen)
+        if ($rest.Length -gt $maxRest) { $rest = $rest.Substring(0, $maxRest) }
+        Write-Seg '  ' $null
+        if ($i -eq $cur) { Write-Seg '>' ([ConsoleColor]::Cyan) } else { Write-Seg ' ' $null }
+        Write-Seg ' ' $null
+        if ($sel[$i]) { Write-Seg $box ([ConsoleColor]::Green) } else { Write-Seg $box $null }
+        Write-Seg ' ' $null
+        Write-Seg $rest $null
+        Pad-End ($prefixLen + $rest.Length) $bw
+      }
+      if (-not [string]::IsNullOrEmpty($errMsg)) {
+        $foot = "  $errMsg"
+        if ($foot.Length -gt $bw) { $foot = $foot.Substring(0, $bw) }
+        Write-Seg $foot ([ConsoleColor]::Yellow)
+        Pad-End $foot.Length $bw
+      } else {
+        $picked = @()
+        for ($i = 0; $i -lt 6; $i++) { if ($sel[$i]) { $picked += $names[$i] } }
+        $csv = if ($picked.Count -gt 0) { $picked -join ',' } else { 'none' }
+        $foot = "  Selected: $csv (q/Esc cancel)"
+        if ($foot.Length -gt $bw) { $foot = $foot.Substring(0, $bw) }
+        Write-Seg $foot ([ConsoleColor]::DarkGray)
+        Pad-End $foot.Length $bw
+      }
+
+      $k = [Console]::ReadKey($true)
+      $ch = [string]$k.KeyChar
+      $isCtrlC = ([int]$k.KeyChar -eq 3) -or (($k.Modifiers -band [ConsoleModifiers]::Control) -and ($k.Key -eq [ConsoleKey]::C))
+      if ($isCtrlC -or $k.Key -eq [ConsoleKey]::Escape -or $ch -ieq 'q') {
+        [Console]::SetCursorPosition(0, [Math]::Min([Console]::BufferHeight - 1, $baseTop + $n))
+        exit 1
+      } elseif ($k.Key -eq [ConsoleKey]::UpArrow -or $ch -ieq 'k') {
+        $cur = ($cur + 5) % 6
+      } elseif ($k.Key -eq [ConsoleKey]::DownArrow -or $ch -ieq 'j') {
+        $cur = ($cur + 1) % 6
+      } elseif ($k.Key -eq [ConsoleKey]::Spacebar -or $ch -eq ' ') {
+        $sel[$cur] = -not $sel[$cur]
+        $errMsg = ''
+      } elseif ($ch -ge '1' -and $ch -le '6') {
+        $cur = [int]::Parse($ch) - 1
+        $sel[$cur] = -not $sel[$cur]
+        $errMsg = ''
+      } elseif ($ch -ieq 'a') {
+        $allOn = $sel[0] -and $sel[1] -and $sel[2] -and $sel[3] -and $sel[4]
+        for ($i = 0; $i -lt 5; $i++) { $sel[$i] = -not $allOn }
+        $errMsg = ''
+      } elseif ($ch -ieq 'n') {
+        for ($i = 0; $i -lt 6; $i++) { $sel[$i] = $false }
+        $errMsg = ''
+      } elseif ($k.Key -eq [ConsoleKey]::Enter) {
+        $picked = @()
+        for ($i = 0; $i -lt 6; $i++) { if ($sel[$i]) { $picked += $names[$i] } }
+        if ($picked.Count -gt 0) {
+          [IO.File]::WriteAllText($outPath, ($picked -join ','), (New-Object System.Text.UTF8Encoding($false)))
+          [Console]::SetCursorPosition(0, [Math]::Min([Console]::BufferHeight - 1, $baseTop + $n))
+          exit 0
+        }
+        $errMsg = 'Select at least one (Space to toggle, q to cancel)'
+      }
+    }
+  }
+} finally {
+  try { [Console]::TreatControlCAsInput = $oldCtrlC } catch {}
+  try { [Console]::CursorVisible = $oldVis } catch {}
+}
+PS_EOF
+)
+    ps_rc=0
+    MSYS_NO_PATHCONV=1 FA_PS_OUT="$ps_out_win" "$ps_bin" -NoProfile -Command "$ps_code" <&3 || ps_rc=$?
+    WIN_PS_VAL=""
+    if [ "$ps_rc" -eq 0 ] && [ -f "$ps_out" ]; then
+        WIN_PS_VAL=$(tr -d '\r\n' < "$ps_out")
+    fi
+    rm -f "$ps_out"
+    return "$ps_rc"
+}
+
+win_ps_pick_scope() {
+    FA_PS_MODE="scope"
+    FA_PS_TITLE=$1
+    FA_PS_OPT1=$2
+    FA_PS_OPT2=$3
+    export FA_PS_MODE FA_PS_TITLE FA_PS_OPT1 FA_PS_OPT2
+    wp_rc=0
+    win_ps_run || wp_rc=$?
+    unset FA_PS_MODE FA_PS_TITLE FA_PS_OPT1 FA_PS_OPT2
+    if [ "$wp_rc" -eq 0 ]; then
+        case "$WIN_PS_VAL" in
+            1|2) PICKED_SCOPE=$WIN_PS_VAL; return 0 ;;
+            *) return 2 ;;
+        esac
+    fi
+    [ "$wp_rc" -eq 1 ] && return 1
+    return 2
+}
+
+win_ps_pick_personas() {
+    FA_PS_MODE="personas"
+    FA_PS_INIT=$1
+    export FA_PS_MODE FA_PS_INIT
+    wp_rc=0
+    win_ps_run || wp_rc=$?
+    unset FA_PS_MODE FA_PS_INIT
+    if [ "$wp_rc" -eq 0 ] && [ -n "$WIN_PS_VAL" ]; then
+        sel_claude=0 sel_copilot=0 sel_codex=0 sel_cursor=0 sel_aider=0 sel_devin=0
+        wp_list="$WIN_PS_VAL,"
+        while [ -n "$wp_list" ]; do
+            wp_item=${wp_list%%,*}
+            wp_list=${wp_list#*,}
+            case "$wp_item" in
+                claude) sel_claude=1 ;;
+                copilot) sel_copilot=1 ;;
+                codex) sel_codex=1 ;;
+                cursor) sel_cursor=1 ;;
+                aider) sel_aider=1 ;;
+                devin) sel_devin=1 ;;
+            esac
+        done
+        collect_picked
+        [ -n "$PICKED_CSV" ] && return 0
+        return 2
+    fi
+    [ "$wp_rc" -eq 1 ] && return 1
+    return 2
 }
 
 tui_cleanup() {
@@ -256,6 +582,13 @@ pick_scope() {
     ps_title=$1
     ps_opt1=$2
     ps_opt2=$3
+
+    if can_win_ps_tui; then
+        wp_sc=0
+        win_ps_pick_scope "$ps_title" "$ps_opt1" "$ps_opt2" || wp_sc=$?
+        [ "$wp_sc" -eq 0 ] && return 0
+        [ "$wp_sc" -eq 1 ] && return 1
+    fi
 
     if ! can_raw_tui; then
         printf '%s\n  1) %s\n  2) %s\nChoice [1]: ' "$ps_title" "$ps_opt1" "$ps_opt2"
@@ -370,6 +703,13 @@ pick_personas() {
             devin) sel_devin=1 ;;
         esac
     done
+
+    if can_win_ps_tui; then
+        wp_pp=0
+        win_ps_pick_personas "$init_csv" || wp_pp=$?
+        [ "$wp_pp" -eq 0 ] && return 0
+        [ "$wp_pp" -eq 1 ] && return 1
+    fi
 
     if can_raw_tui; then
         tui_enter
@@ -542,7 +882,9 @@ emit_hook() {
 chain() {
     [ "${_FAKEAUTHOR_CHAINED:-0}" = "1" ] && exit 0
     common=$(git rev-parse --git-common-dir 2>/dev/null) || exit 0
-    h="$common/hooks/${0##*/}"
+    hook_name=${0##*/}
+    hook_name=${hook_name##*\\}
+    h="$common/hooks/$hook_name"
     [ -x "$h" ] || exit 0
     self_dir=$(cd "$(dirname "$0")" 2>/dev/null && pwd -P) || self_dir=""
     hook_dir=$(cd "$(dirname "$h")" 2>/dev/null && pwd -P) || hook_dir=""
@@ -552,10 +894,47 @@ chain() {
 
 [ -n "${NO_FAKEAUTHOR:-}" ] && [ "$NO_FAKEAUTHOR" != "0" ] && chain "$@"
 
-off=$(git config --bool fakeauthor.off 2>/dev/null || true)
-[ "$off" = "true" ] && chain "$@"
+cfg_out=$(git config --get-regexp '^fakeauthor\.' 2>/dev/null || true)
+raw_off=""
+rate=""
+raw_persona=""
+o_name=""
+o_email=""
+if [ -n "$cfg_out" ]; then
+    cfg_nl='
+'
+    cfg_rest="${cfg_out}${cfg_nl}"
+    while [ -n "$cfg_rest" ]; do
+        cfg_line=${cfg_rest%%"$cfg_nl"*}
+        cfg_rest=${cfg_rest#*"$cfg_nl"}
+        [ -z "$cfg_line" ] && continue
+        case "$cfg_line" in
+            *" "*) cfg_k=${cfg_line%% *}; cfg_v=${cfg_line#* } ;;
+            *)     cfg_k=$cfg_line; cfg_v="__BARE__" ;;
+        esac
+        if [ "$cfg_k" = "fakeauthor.off" ]; then
+            raw_off=$cfg_v
+        else
+            [ "$cfg_v" = "__BARE__" ] && cfg_v=""
+            case "$cfg_k" in
+                fakeauthor.rate) rate=$cfg_v ;;
+                fakeauthor.persona) raw_persona=$cfg_v ;;
+                fakeauthor.name) o_name=$cfg_v ;;
+                fakeauthor.email) o_email=$cfg_v ;;
+            esac
+        fi
+    done
+fi
 
-rate=$(git config fakeauthor.rate 2>/dev/null || true)
+case "$raw_off" in
+    __BARE__|true|yes|on|1) chain "$@" ;;
+    ""|false|no|off|0) ;;
+    *)
+        off=$(git config --bool fakeauthor.off 2>/dev/null || true)
+        [ "$off" = "true" ] && chain "$@"
+        ;;
+esac
+
 [ -z "$rate" ] && rate=1
 case "$rate" in
     0|0.0|0.00) chain "$@" ;;
@@ -580,18 +959,16 @@ if [ -f "$gitdir/MERGE_HEAD" ] || [ -f "$gitdir/SQUASH_MSG" ]; then
     chain "$@"
 fi
 
-if command -v sed >/dev/null 2>&1; then
+if command -v sed >/dev/null 2>&1 && command -v tr >/dev/null 2>&1; then
+    cleaned=$(tr -d '\r' < "$1" 2>/dev/null | sed '/^[^[:space:]]* -\{1,\} >8 -\{1,\}$/,$d' 2>/dev/null | git stripspace --strip-comments 2>/dev/null)
+elif command -v sed >/dev/null 2>&1; then
     cleaned=$(sed '/^[^[:space:]]* -\{1,\} >8 -\{1,\}$/,$d' "$1" 2>/dev/null | git stripspace --strip-comments 2>/dev/null)
 else
     cleaned=$(git stripspace --strip-comments < "$1" 2>/dev/null)
 fi
 [ -z "$cleaned" ] && chain "$@"
 
-raw_persona=$(git config fakeauthor.persona 2>/dev/null || true)
 [ -z "$raw_persona" ] && raw_persona=claude
-
-o_name=$(git config fakeauthor.name 2>/dev/null || true)
-o_email=$(git config fakeauthor.email 2>/dev/null || true)
 
 plist="$raw_persona,"
 while [ -n "$plist" ]; do
@@ -670,7 +1047,9 @@ emit_chain_stub() {
 # fakeauthor chain stub v1
 [ "${_FAKEAUTHOR_CHAINED:-0}" = "1" ] && exit 0
 common=$(git rev-parse --git-common-dir 2>/dev/null) || exit 0
-h="$common/hooks/${0##*/}"
+hook_name=${0##*/}
+hook_name=${hook_name##*\\}
+h="$common/hooks/$hook_name"
 [ -x "$h" ] || exit 0
 self_dir=$(cd "$(dirname "$0")" 2>/dev/null && pwd -P) || self_dir=""
 hook_dir=$(cd "$(dirname "$h")" 2>/dev/null && pwd -P) || hook_dir=""
@@ -686,10 +1065,25 @@ emit_ctl() {
 set -eu
 
 ALL_PERSONAS="claude copilot codex cursor aider devin"
+IS_WINDOWS=0
+case "$(uname -s 2>/dev/null || true)" in
+    MINGW*|MSYS*|CYGWIN*) IS_WINDOWS=1 ;;
+esac
+CR_CH=$(printf '\r')
+
+norm_slashes() {
+    case "$1" in
+        *\\*) printf '%s\n' "$1" | tr '\\' '/' ;;
+        *) printf '%s\n' "$1" ;;
+    esac
+}
 
 script_dir=""
 case "$0" in
-    */*) script_dir=$(cd "$(dirname "$0")" 2>/dev/null && pwd -P) || script_dir="" ;;
+    */*|*\\*)
+        ctl_self=$(norm_slashes "$0")
+        script_dir=$(cd "$(dirname "$ctl_self")" 2>/dev/null && pwd -P) || script_dir=""
+        ;;
 esac
 
 if [ -z "${FAKEAUTHOR_DIR:-}" ]; then
@@ -699,6 +1093,7 @@ if [ -z "${FAKEAUTHOR_DIR:-}" ]; then
         FAKEAUTHOR_DIR="$HOME/.local/share/fakeauthor"
     fi
 fi
+FAKEAUTHOR_DIR=$(norm_slashes "$FAKEAUTHOR_DIR")
 
 ctl_usage() {
     cat >&2 <<'USAGE'
@@ -709,24 +1104,42 @@ USAGE
 canon_path() {
     p=${1:-}
     [ -z "$p" ] && return 0
+    p=$(norm_slashes "$p")
+    orig_p=$p
     suffix=""
     while [ ! -d "$p" ] && [ "$p" != "/" ] && [ "$p" != "." ]; do
+        case "$p" in [A-Za-z]:|[A-Za-z]:/) break ;; esac
+        parent=$(dirname "$p")
+        case "$parent" in [A-Za-z]:) parent="$parent/" ;; esac
+        [ "$parent" = "$p" ] && break
         b=$(basename "$p")
         suffix="/$b$suffix"
-        p=$(dirname "$p")
+        p=$parent
     done
     if [ -d "$p" ]; then
         cp=$(cd "$p" 2>/dev/null && pwd -P) || cp=$p
         printf '%s%s\n' "${cp%/}" "$suffix"
     else
-        printf '%s\n' "${1%/}"
+        printf '%s\n' "${orig_p%/}"
     fi
+}
+
+same_path() {
+    sp_a=$(canon_path "$1")
+    sp_b=$(canon_path "$2")
+    [ "$sp_a" = "$sp_b" ] && return 0
+    if [ "$IS_WINDOWS" -eq 1 ]; then
+        sp_a=$(printf '%s' "$sp_a" | tr '[:upper:]' '[:lower:]')
+        sp_b=$(printf '%s' "$sp_b" | tr '[:upper:]' '[:lower:]')
+        [ "$sp_a" = "$sp_b" ] && return 0
+    fi
+    return 1
 }
 
 trim_ws() {
     t=$1
-    while [ "${t# }" != "$t" ] || [ "${t#	}" != "$t" ]; do t=${t#?}; done
-    while [ "${t% }" != "$t" ] || [ "${t%	}" != "$t" ]; do t=${t%?}; done
+    while [ "${t# }" != "$t" ] || [ "${t#	}" != "$t" ] || [ "${t#"$CR_CH"}" != "$t" ]; do t=${t#?}; done
+    while [ "${t% }" != "$t" ] || [ "${t%	}" != "$t" ] || [ "${t%"$CR_CH"}" != "$t" ]; do t=${t%?}; done
     printf '%s' "$t"
 }
 
@@ -816,13 +1229,299 @@ TUI_NOWRAP=0
 
 has_tty() {
     [ -n "${FAKEAUTHOR_TTY:-}" ] && [ -r "$FAKEAUTHOR_TTY" ] && return 0
-    [ -t 1 ] && [ -r /dev/tty ]
+    [ -t 1 ] && { [ -r /dev/tty ] || { [ "$IS_WINDOWS" -eq 1 ] && [ -t 0 ]; }; }
 }
 
 can_raw_tui() {
     [ -t 3 ] && [ -t 1 ] && [ "${TERM:-dumb}" != "dumb" ] || return 1
+    if [ "$IS_WINDOWS" -eq 1 ]; then
+        case "$(tty <&3 2>/dev/null || true)" in
+            /dev/cons*) return 1 ;;
+        esac
+    fi
     command -v stty >/dev/null 2>&1 && command -v dd >/dev/null 2>&1 || return 1
     stty -g <&3 >/dev/null 2>&1
+}
+
+find_win_ps() {
+    if command -v pwsh.exe >/dev/null 2>&1; then
+        command -v pwsh.exe
+    elif command -v powershell.exe >/dev/null 2>&1; then
+        command -v powershell.exe
+    elif [ -x "/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe" ]; then
+        printf '%s\n' "/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe"
+    else
+        return 1
+    fi
+}
+
+can_win_ps_tui() {
+    [ "$IS_WINDOWS" -eq 1 ] && [ -z "${FAKEAUTHOR_TTY:-}" ] && [ -t 0 ] && [ -t 1 ] || return 1
+    case "$(tty <&3 2>/dev/null || true)" in
+        /dev/cons*) ;;
+        *) return 1 ;;
+    esac
+    command -v cygpath >/dev/null 2>&1 || return 1
+    find_win_ps >/dev/null 2>&1
+}
+
+win_ps_run() {
+    ps_bin=$(find_win_ps) || return 2
+    ps_out=$(mktemp 2>/dev/null) || return 2
+    ps_out_win=$(cygpath -w "$ps_out" 2>/dev/null) || { rm -f "$ps_out"; return 2; }
+    ps_code=$(cat <<'PS_EOF'
+$ErrorActionPreference = 'Stop'
+if ([Console]::IsInputRedirected -or [Console]::IsOutputRedirected) { exit 2 }
+$mode = $env:FA_PS_MODE
+$outPath = $env:FA_PS_OUT
+$noColor = -not [string]::IsNullOrEmpty($env:NO_COLOR)
+$oldVis = $true
+$oldCtrlC = $false
+try { $oldVis = [Console]::CursorVisible } catch {}
+try { $oldCtrlC = [Console]::TreatControlCAsInput } catch {}
+
+function Write-Seg($txt, $fg) {
+  if ($noColor -or $null -eq $fg) {
+    [Console]::Write($txt)
+  } else {
+    $prev = [Console]::ForegroundColor
+    [Console]::ForegroundColor = $fg
+    [Console]::Write($txt)
+    [Console]::ForegroundColor = $prev
+  }
+}
+
+function Pad-End($used, $bw) {
+  $rem = $bw - $used
+  if ($rem -gt 0) { [Console]::Write((' ' * $rem)) }
+  [Console]::Write("`n")
+}
+
+try {
+  try { [Console]::CursorVisible = $false } catch {}
+  try { [Console]::TreatControlCAsInput = $true } catch {}
+  if ([Console]::CursorLeft -gt 0) { [Console]::Write("`n") }
+
+  if ($mode -eq 'scope') {
+    $title = $env:FA_PS_TITLE
+    $opts = @($env:FA_PS_OPT1, $env:FA_PS_OPT2)
+    $cur = 0
+    $n = 4
+    for ($i = 0; $i -lt $n; $i++) { [Console]::Write("`n") }
+    $baseTop = [Math]::Max(0, [Console]::CursorTop - $n)
+    while ($true) {
+      $bw = 80
+      try { $bw = [Math]::Max(20, [Console]::BufferWidth - 1) } catch {}
+      [Console]::SetCursorPosition(0, $baseTop)
+      $t = if ($title.Length -gt $bw) { $title.Substring(0, $bw) } else { $title }
+      Write-Seg $t $null
+      Pad-End $t.Length $bw
+      for ($i = 0; $i -lt 2; $i++) {
+        $num = [string]($i + 1)
+        $lbl = $opts[$i]
+        if ($i -eq $cur) {
+          $pre = '  > '
+          $rest = "$num) $lbl"
+          $maxRest = [Math]::Max(0, $bw - $pre.Length)
+          if ($rest.Length -gt $maxRest) { $rest = $rest.Substring(0, $maxRest) }
+          Write-Seg '  ' $null
+          Write-Seg '>' ([ConsoleColor]::Cyan)
+          Write-Seg ' ' $null
+          Write-Seg $rest $null
+          Pad-End ($pre.Length + $rest.Length) $bw
+        } else {
+          $line = "    $num) $lbl"
+          if ($line.Length -gt $bw) { $line = $line.Substring(0, $bw) }
+          Write-Seg $line $null
+          Pad-End $line.Length $bw
+        }
+      }
+      $hint = '  Move: arrows/j/k | Select: Enter | Cancel: q/Esc'
+      if ($hint.Length -gt $bw) { $hint = $hint.Substring(0, $bw) }
+      Write-Seg $hint ([ConsoleColor]::DarkGray)
+      Pad-End $hint.Length $bw
+
+      $k = [Console]::ReadKey($true)
+      $ch = [string]$k.KeyChar
+      $isCtrlC = ([int]$k.KeyChar -eq 3) -or (($k.Modifiers -band [ConsoleModifiers]::Control) -and ($k.Key -eq [ConsoleKey]::C))
+      if ($isCtrlC -or $k.Key -eq [ConsoleKey]::Escape -or $ch -ieq 'q') {
+        [Console]::SetCursorPosition(0, [Math]::Min([Console]::BufferHeight - 1, $baseTop + $n))
+        exit 1
+      } elseif ($k.Key -eq [ConsoleKey]::UpArrow -or $k.Key -eq [ConsoleKey]::DownArrow -or $ch -ieq 'j' -or $ch -ieq 'k') {
+        $cur = 1 - $cur
+      } elseif ($ch -eq '1') {
+        $cur = 0
+      } elseif ($ch -eq '2') {
+        $cur = 1
+      } elseif ($k.Key -eq [ConsoleKey]::Enter -or $k.Key -eq [ConsoleKey]::Spacebar -or $ch -eq ' ') {
+        [IO.File]::WriteAllText($outPath, [string]($cur + 1), (New-Object System.Text.UTF8Encoding($false)))
+        [Console]::SetCursorPosition(0, [Math]::Min([Console]::BufferHeight - 1, $baseTop + $n))
+        exit 0
+      }
+    }
+  } else {
+    $names = @('claude','copilot','codex','cursor','aider','devin')
+    $labels = @(
+      'Claude   <noreply@anthropic.com>',
+      'Copilot  <223556219+Copilot@users.noreply.github.com>',
+      'Codex    <noreply@openai.com>',
+      'Cursor   <cursoragent@cursor.com>',
+      'aider    <aider@aider.chat>',
+      'Devin    (author mode: git devin commit)'
+    )
+    $sel = [bool[]]@($false,$false,$false,$false,$false,$false)
+    foreach ($item in ($env:FA_PS_INIT -split ',')) {
+      $t = $item.Trim()
+      if ($t -eq 'all') {
+        for ($i = 0; $i -lt 5; $i++) { $sel[$i] = $true }
+      } else {
+        $idx = [Array]::IndexOf($names, $t)
+        if ($idx -ge 0) { $sel[$idx] = $true }
+      }
+    }
+    $cur = 0
+    $errMsg = ''
+    $n = 8
+    for ($i = 0; $i -lt $n; $i++) { [Console]::Write("`n") }
+    $baseTop = [Math]::Max(0, [Console]::CursorTop - $n)
+    while ($true) {
+      $bw = 80
+      try { $bw = [Math]::Max(20, [Console]::BufferWidth - 1) } catch {}
+      [Console]::SetCursorPosition(0, $baseTop)
+      $hdr = 'Pick co-author(s) (arrows/j/k move, Space toggle, a all, Enter):'
+      if ($hdr.Length -gt $bw) { $hdr = $hdr.Substring(0, $bw) }
+      Write-Seg $hdr $null
+      Pad-End $hdr.Length $bw
+      for ($i = 0; $i -lt 6; $i++) {
+        $num = [string]($i + 1)
+        $box = if ($sel[$i]) { '[x]' } else { '[ ]' }
+        $lbl = $labels[$i]
+        $prefixLen = 8
+        $rest = "$num) $lbl"
+        $maxRest = [Math]::Max(0, $bw - $prefixLen)
+        if ($rest.Length -gt $maxRest) { $rest = $rest.Substring(0, $maxRest) }
+        Write-Seg '  ' $null
+        if ($i -eq $cur) { Write-Seg '>' ([ConsoleColor]::Cyan) } else { Write-Seg ' ' $null }
+        Write-Seg ' ' $null
+        if ($sel[$i]) { Write-Seg $box ([ConsoleColor]::Green) } else { Write-Seg $box $null }
+        Write-Seg ' ' $null
+        Write-Seg $rest $null
+        Pad-End ($prefixLen + $rest.Length) $bw
+      }
+      if (-not [string]::IsNullOrEmpty($errMsg)) {
+        $foot = "  $errMsg"
+        if ($foot.Length -gt $bw) { $foot = $foot.Substring(0, $bw) }
+        Write-Seg $foot ([ConsoleColor]::Yellow)
+        Pad-End $foot.Length $bw
+      } else {
+        $picked = @()
+        for ($i = 0; $i -lt 6; $i++) { if ($sel[$i]) { $picked += $names[$i] } }
+        $csv = if ($picked.Count -gt 0) { $picked -join ',' } else { 'none' }
+        $foot = "  Selected: $csv (q/Esc cancel)"
+        if ($foot.Length -gt $bw) { $foot = $foot.Substring(0, $bw) }
+        Write-Seg $foot ([ConsoleColor]::DarkGray)
+        Pad-End $foot.Length $bw
+      }
+
+      $k = [Console]::ReadKey($true)
+      $ch = [string]$k.KeyChar
+      $isCtrlC = ([int]$k.KeyChar -eq 3) -or (($k.Modifiers -band [ConsoleModifiers]::Control) -and ($k.Key -eq [ConsoleKey]::C))
+      if ($isCtrlC -or $k.Key -eq [ConsoleKey]::Escape -or $ch -ieq 'q') {
+        [Console]::SetCursorPosition(0, [Math]::Min([Console]::BufferHeight - 1, $baseTop + $n))
+        exit 1
+      } elseif ($k.Key -eq [ConsoleKey]::UpArrow -or $ch -ieq 'k') {
+        $cur = ($cur + 5) % 6
+      } elseif ($k.Key -eq [ConsoleKey]::DownArrow -or $ch -ieq 'j') {
+        $cur = ($cur + 1) % 6
+      } elseif ($k.Key -eq [ConsoleKey]::Spacebar -or $ch -eq ' ') {
+        $sel[$cur] = -not $sel[$cur]
+        $errMsg = ''
+      } elseif ($ch -ge '1' -and $ch -le '6') {
+        $cur = [int]::Parse($ch) - 1
+        $sel[$cur] = -not $sel[$cur]
+        $errMsg = ''
+      } elseif ($ch -ieq 'a') {
+        $allOn = $sel[0] -and $sel[1] -and $sel[2] -and $sel[3] -and $sel[4]
+        for ($i = 0; $i -lt 5; $i++) { $sel[$i] = -not $allOn }
+        $errMsg = ''
+      } elseif ($ch -ieq 'n') {
+        for ($i = 0; $i -lt 6; $i++) { $sel[$i] = $false }
+        $errMsg = ''
+      } elseif ($k.Key -eq [ConsoleKey]::Enter) {
+        $picked = @()
+        for ($i = 0; $i -lt 6; $i++) { if ($sel[$i]) { $picked += $names[$i] } }
+        if ($picked.Count -gt 0) {
+          [IO.File]::WriteAllText($outPath, ($picked -join ','), (New-Object System.Text.UTF8Encoding($false)))
+          [Console]::SetCursorPosition(0, [Math]::Min([Console]::BufferHeight - 1, $baseTop + $n))
+          exit 0
+        }
+        $errMsg = 'Select at least one (Space to toggle, q to cancel)'
+      }
+    }
+  }
+} finally {
+  try { [Console]::TreatControlCAsInput = $oldCtrlC } catch {}
+  try { [Console]::CursorVisible = $oldVis } catch {}
+}
+PS_EOF
+)
+    ps_rc=0
+    MSYS_NO_PATHCONV=1 FA_PS_OUT="$ps_out_win" "$ps_bin" -NoProfile -Command "$ps_code" <&3 || ps_rc=$?
+    WIN_PS_VAL=""
+    if [ "$ps_rc" -eq 0 ] && [ -f "$ps_out" ]; then
+        WIN_PS_VAL=$(tr -d '\r\n' < "$ps_out")
+    fi
+    rm -f "$ps_out"
+    return "$ps_rc"
+}
+
+win_ps_pick_scope() {
+    FA_PS_MODE="scope"
+    FA_PS_TITLE=$1
+    FA_PS_OPT1=$2
+    FA_PS_OPT2=$3
+    export FA_PS_MODE FA_PS_TITLE FA_PS_OPT1 FA_PS_OPT2
+    wp_rc=0
+    win_ps_run || wp_rc=$?
+    unset FA_PS_MODE FA_PS_TITLE FA_PS_OPT1 FA_PS_OPT2
+    if [ "$wp_rc" -eq 0 ]; then
+        case "$WIN_PS_VAL" in
+            1|2) PICKED_SCOPE=$WIN_PS_VAL; return 0 ;;
+            *) return 2 ;;
+        esac
+    fi
+    [ "$wp_rc" -eq 1 ] && return 1
+    return 2
+}
+
+win_ps_pick_personas() {
+    FA_PS_MODE="personas"
+    FA_PS_INIT=$1
+    export FA_PS_MODE FA_PS_INIT
+    wp_rc=0
+    win_ps_run || wp_rc=$?
+    unset FA_PS_MODE FA_PS_INIT
+    if [ "$wp_rc" -eq 0 ] && [ -n "$WIN_PS_VAL" ]; then
+        sel_claude=0 sel_copilot=0 sel_codex=0 sel_cursor=0 sel_aider=0 sel_devin=0
+        wp_list="$WIN_PS_VAL,"
+        while [ -n "$wp_list" ]; do
+            wp_item=${wp_list%%,*}
+            wp_list=${wp_list#*,}
+            case "$wp_item" in
+                claude) sel_claude=1 ;;
+                copilot) sel_copilot=1 ;;
+                codex) sel_codex=1 ;;
+                cursor) sel_cursor=1 ;;
+                aider) sel_aider=1 ;;
+                devin) sel_devin=1 ;;
+            esac
+        done
+        collect_picked
+        [ -n "$PICKED_CSV" ] && return 0
+        return 2
+    fi
+    [ "$wp_rc" -eq 1 ] && return 1
+    return 2
 }
 
 tui_cleanup() {
@@ -901,6 +1600,13 @@ pick_scope() {
     ps_title=$1
     ps_opt1=$2
     ps_opt2=$3
+
+    if can_win_ps_tui; then
+        wp_sc=0
+        win_ps_pick_scope "$ps_title" "$ps_opt1" "$ps_opt2" || wp_sc=$?
+        [ "$wp_sc" -eq 0 ] && return 0
+        [ "$wp_sc" -eq 1 ] && return 1
+    fi
 
     if ! can_raw_tui; then
         printf '%s\n  1) %s\n  2) %s\nChoice [1]: ' "$ps_title" "$ps_opt1" "$ps_opt2"
@@ -1015,6 +1721,13 @@ pick_personas() {
             devin) sel_devin=1 ;;
         esac
     done
+
+    if can_win_ps_tui; then
+        wp_pp=0
+        win_ps_pick_personas "$init_csv" || wp_pp=$?
+        [ "$wp_pp" -eq 0 ] && return 0
+        [ "$wp_pp" -eq 1 ] && return 1
+    fi
 
     if can_raw_tui; then
         tui_enter
@@ -1342,7 +2055,7 @@ cmd_status() {
     [ -x "$M_HOOKS_DIR/commit-msg" ] || state="partially uninstalled"
     if [ "$M_MODE" = "global" ]; then
         cur_exp=$(git config --global --path --get core.hooksPath 2>/dev/null || true)
-        [ "$(canon_path "$cur_exp")" = "$M_HOOKS_DIR" ] || state="partially uninstalled"
+        same_path "$cur_exp" "$M_HOOKS_DIR" || state="partially uninstalled"
     fi
 
     hp=$(git config "$scope_flag" --get core.hooksPath 2>/dev/null || echo unset)
@@ -1373,12 +2086,11 @@ cmd_uninstall() {
         cur_raw=$(git config --global --get core.hooksPath 2>/dev/null || true)
         cur_exp=$(git config --global --path --get core.hooksPath 2>/dev/null || true)
         if [ -n "$cur_raw" ]; then
-            cur_canon=$(canon_path "$cur_exp")
-            if [ "$cur_canon" = "$M_HOOKS_DIR" ]; then
+            if same_path "$cur_exp" "$M_HOOKS_DIR"; then
                 if [ "$M_HOOKSPATH_PREV" = "UNSET" ] || [ -z "$M_HOOKSPATH_PREV" ]; then
                     git config --global --unset core.hooksPath || true
                 else
-                    git config --global core.hooksPath "$M_HOOKSPATH_PREV"
+                    MSYS_NO_PATHCONV=1 git config --global core.hooksPath "$M_HOOKSPATH_PREV"
                 fi
             elif [ "$cur_raw" = "$M_HOOKSPATH_PREV" ]; then
                 :
@@ -1491,7 +2203,13 @@ cmd_interactive() {
     fi
     read_manifest "$manifest"
 
-    exec 3<"${FAKEAUTHOR_TTY:-/dev/tty}"
+    if [ -n "${FAKEAUTHOR_TTY:-}" ]; then
+        exec 3<"$FAKEAUTHOR_TTY"
+    elif [ -r /dev/tty ]; then
+        exec 3</dev/tty
+    else
+        exec 3<&0
+    fi
     target="manifest"
     if [ "$M_MODE" = "global" ] && [ -z "$scope_override" ] && git rev-parse --git-common-dir >/dev/null 2>&1; then
         sc_rc=0
@@ -1773,14 +2491,12 @@ cmd_install_global() {
     hook_dir="$FAKEAUTHOR_DIR/hooks"
     manifest="$FAKEAUTHOR_DIR/manifest"
     ctl="$FAKEAUTHOR_DIR/fakeauthor.sh"
-    target_canon=$(canon_path "$hook_dir")
 
     cur_raw=$(git config --global --get core.hooksPath 2>/dev/null || true)
     cur_exp=$(git config --global --path --get core.hooksPath 2>/dev/null || true)
 
     if [ -n "$cur_raw" ]; then
-        cur_canon=$(canon_path "$cur_exp")
-        if [ "$cur_canon" != "$target_canon" ]; then
+        if ! same_path "$cur_exp" "$hook_dir"; then
             echo "fakeauthor: global core.hooksPath is already set to '$cur_raw'; refusing to clobber (try --local)" >&2
             exit 1
         fi
@@ -1834,7 +2550,7 @@ cmd_install_global() {
     write_managed "$ctl" emit_ctl "$prev_ctl_hash" "$force" 1
     W_CTL_HASH=$WRITTEN_HASH
 
-    git config --global core.hooksPath "$hook_dir"
+    git config --global core.hooksPath "$(to_git_path "$hook_dir")"
     git config --global fakeauthor.persona "$persona_csv"
     if ! git config --global --get fakeauthor.rate >/dev/null 2>&1; then
         git config --global fakeauthor.rate 1
@@ -1842,12 +2558,13 @@ cmd_install_global() {
 
     sync_persona_aliases --global "$M_ALIASES" "$persona_list"
 
-    if [ "$FAKEAUTHOR_DIR" = "$HOME/.local/share/fakeauthor" ]; then
+    if [ "$FAKEAUTHOR_DIR" = "$DEFAULT_FAKEAUTHOR_DIR" ]; then
         ctl_alias_target='!sh "$HOME/.local/share/fakeauthor/fakeauthor.sh"'
         ctl_fallback="sh ~/.local/share/fakeauthor/fakeauthor.sh status"
     else
-        ctl_alias_target="!sh '$(sq_escape "$FAKEAUTHOR_DIR")/fakeauthor.sh'"
-        ctl_fallback="sh $FAKEAUTHOR_DIR/fakeauthor.sh status"
+        ctl_dir_git=$(to_git_path "$FAKEAUTHOR_DIR")
+        ctl_alias_target="!sh '$(sq_escape "$ctl_dir_git")/fakeauthor.sh'"
+        ctl_fallback="sh $ctl_dir_git/fakeauthor.sh status"
     fi
     sync_ctl_alias --global "$ctl_alias_target" "$M_CTL_ALIAS_VAL"
 
@@ -1951,7 +2668,13 @@ cmd_wizard() {
     scope_flag=$1
     force=$2
 
-    exec 3<"${FAKEAUTHOR_TTY:-/dev/tty}"
+    if [ -n "${FAKEAUTHOR_TTY:-}" ]; then
+        exec 3<"$FAKEAUTHOR_TTY"
+    elif [ -r /dev/tty ]; then
+        exec 3</dev/tty
+    else
+        exec 3<&0
+    fi
     if [ -z "$scope_flag" ]; then
         if git rev-parse --git-common-dir >/dev/null 2>&1; then
             repo_top=$(git rev-parse --show-toplevel 2>/dev/null || pwd)

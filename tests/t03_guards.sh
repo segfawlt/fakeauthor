@@ -112,6 +112,26 @@ assert_fails "commit -v empty editor with commentChar=; aborts" \
 git -C "$REPO" reset -q HEAD cv.txt
 git -C "$REPO" config --unset core.commentChar
 
+# 6b. CRLF commit with core.commentChar=; aborts, and commit-msg skips CRLF commit -v empty message
+crlf_ed="$SANDBOX/crlf_ed.sh"
+cat > "$crlf_ed" <<'EOF'
+#!/bin/sh
+awk '{ sub(/\r$/, ""); printf "%s\r\n", $0 }' "$1" > "$1.crlf" && mv "$1.crlf" "$1"
+EOF
+chmod +x "$crlf_ed"
+git -C "$REPO" config core.commentChar ';'
+echo "cv2" > "$REPO/cv2.txt"
+git -C "$REPO" add cv2.txt
+assert_fails "CRLF commit empty editor with commentChar=; aborts" \
+    env GIT_EDITOR="$crlf_ed" git -C "$REPO" commit
+git -C "$REPO" reset -q HEAD cv2.txt
+
+printf '\r\n; comment\r\n; ------------------------ >8 ------------------------\r\ndiff --git a/x b/x\r\n+hi\r\n' > "$SANDBOX/crlf_v.msg"
+(cd "$REPO" && "$HOME/.local/share/fakeauthor/hooks/commit-msg" "$SANDBOX/crlf_v.msg")
+assert_not_contains "Co-Authored-By:" "$(cat "$SANDBOX/crlf_v.msg")" \
+    "commit-msg hook does not inject trailer on CRLF commit -v empty message"
+git -C "$REPO" config --unset core.commentChar
+
 # 7. merge --no-commit --no-ff and merge --squash skip trailer
 git -C "$REPO" checkout -q -b br1
 echo "br1" > "$REPO/br1.txt"
@@ -133,3 +153,22 @@ git -C "$REPO" checkout -q main
 git -C "$REPO" merge --squash br2 >/dev/null 2>&1
 git -C "$REPO" commit -m "squash br2" >/dev/null
 assert_eq "" "$(git -C "$REPO" log -1 --pretty=%\(trailers\))" "squash commit skips trailer"
+
+# 8. git -c fakeauthor.off=true and bare valueless fakeauthor.off skip; -c fakeauthor.off=false overrides
+echo "c_off" > "$REPO/c_off.txt"
+git -C "$REPO" add c_off.txt
+git -C "$REPO" -c fakeauthor.off=true commit -m "cli off true" >/dev/null
+assert_eq "" "$(git -C "$REPO" log -1 --pretty=%\(trailers\))" "-c fakeauthor.off=true skips trailer"
+
+printf '\n[fakeauthor]\n\toff\n' >> "$REPO/.git/config"
+echo "bare_off" > "$REPO/bare_off.txt"
+git -C "$REPO" add bare_off.txt
+git -C "$REPO" commit -m "bare off skips" >/dev/null
+assert_eq "" "$(git -C "$REPO" log -1 --pretty=%\(trailers\))" "bare valueless fakeauthor.off skips trailer"
+
+echo "bare_ov" > "$REPO/bare_ov.txt"
+git -C "$REPO" add bare_ov.txt
+git -C "$REPO" -c fakeauthor.off=false commit -m "cli off false overrides bare" >/dev/null
+assert_eq "Co-Authored-By: Claude <noreply@anthropic.com>" \
+    "$(git -C "$REPO" log -1 --pretty=%\(trailers\))" "-c fakeauthor.off=false overrides bare fakeauthor.off"
+git -C "$REPO" config --unset-all fakeauthor.off 2>/dev/null || true

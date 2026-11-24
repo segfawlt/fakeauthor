@@ -69,7 +69,7 @@ assert_contains "Saved: claude,codex (global)" "$out6" "subsequent 1,3 saves cla
 assert_eq "claude,codex" "$(git config --global fakeauthor.persona)" "global persona equals claude,codex"
 
 # 7. Real PTY tests for raw-mode TUI (arrows, j/k, Space, a, Enter, Esc, Ctrl-C, stty restore)
-if command -v python3 >/dev/null 2>&1; then
+if command -v python3 >/dev/null 2>&1 && python3 -c 'import fcntl, pty, termios' 2>/dev/null; then
     pty_py="$SANDBOX/pty_driver.py"
     cat > "$pty_py" <<'PY'
 import fcntl, os, pty, select, struct, subprocess, sys, termios, time
