@@ -92,6 +92,9 @@ function Invoke-FakeAuthorInstall {
       } else {
         'https://raw.githubusercontent.com/segfawlt/fakeauthor/refs/heads/main/install.sh'
       }
+      if (-not [Console]::IsOutputRedirected) {
+        [Console]::WriteLine('fakeauthor: downloading installer...')
+      }
       try {
         [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
       } catch {}

@@ -42,7 +42,9 @@ re-open the menu and modify co-authors or scope:
 git fakeauthor            # open the interactive menu to modify co-authors/scope
 git fakeauthor off        # pause in this repo (or globally outside a repo)
 git fakeauthor on         # resume in this repo (or globally outside a repo)
-git fakeauthor status     # show active state, personas, rate, and aliases
+git fakeauthor status     # show active state, version, personas, rate, and aliases
+git fakeauthor update     # check for updates and update/repair install
+git fakeauthor update --check # check for updates without modifying files
 git fakeauthor uninstall  # exact manifest-verified removal
 git devin commit -m "hi"  # author mode (also works as git claude, git codex, ...)
 ```

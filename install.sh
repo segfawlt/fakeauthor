@@ -16,6 +16,8 @@ norm_slashes() {
     esac
 }
 
+FAKEAUTHOR_VERSION="0.2.0"
+FAKEAUTHOR_UPDATE_URL_DEFAULT="https://raw.githubusercontent.com/segfawlt/fakeauthor/refs/heads/main/install.sh"
 DEFAULT_FAKEAUTHOR_DIR=$(norm_slashes "$HOME/.local/share/fakeauthor")
 FAKEAUTHOR_DIR=$(norm_slashes "${FAKEAUTHOR_DIR:-$DEFAULT_FAKEAUTHOR_DIR}")
 STUB_HOOKS="applypatch-msg pre-applypatch post-applypatch pre-commit pre-merge-commit prepare-commit-msg post-commit pre-rebase post-checkout post-merge pre-push post-rewrite sendemail-validate"
@@ -23,7 +25,7 @@ ALL_PERSONAS="claude copilot codex cursor aider devin"
 
 usage() {
     cat >&2 <<'EOF'
-usage: sh install.sh [--local|--global] [--force] [persona[,persona...]|all|on|off|status|uninstall|show <persona>]
+usage: sh install.sh [--local|--global] [--force] [--check] [persona[,persona...]|all|on|off|status|update|uninstall|show <persona>]
 EOF
 }
 
@@ -1069,6 +1071,8 @@ emit_ctl() {
 set -eu
 
 ALL_PERSONAS="claude copilot codex cursor aider devin"
+FAKEAUTHOR_VERSION="0.2.0"
+FAKEAUTHOR_UPDATE_URL_DEFAULT="https://raw.githubusercontent.com/segfawlt/fakeauthor/refs/heads/main/install.sh"
 IS_WINDOWS=0
 case "$(uname -s 2>/dev/null || true)" in
     MINGW*|MSYS*|CYGWIN*) IS_WINDOWS=1 ;;
@@ -1101,7 +1105,7 @@ FAKEAUTHOR_DIR=$(norm_slashes "$FAKEAUTHOR_DIR")
 
 ctl_usage() {
     cat >&2 <<'USAGE'
-usage: git fakeauthor [--local|--global] [on|off|status|uninstall|show <persona>|persona[,persona...]|all]
+usage: git fakeauthor [--local|--global] [--check] [--force] [on|off|status|update|uninstall|show <persona>|persona[,persona...]|all]
 USAGE
 }
 
@@ -1891,7 +1895,7 @@ print_preview() {
 }
 
 read_manifest() {
-    M_VERSION="" M_MODE="" M_HOOKS_DIR="" M_HOOKSPATH_PREV="UNSET" M_PERSONA=""
+    M_VERSION="" M_SCRIPT_VERSION="" M_MODE="" M_HOOKS_DIR="" M_HOOKSPATH_PREV="UNSET" M_PERSONA=""
     M_KEYS="" M_ALIASES="NONE" M_CTL_ALIAS="NONE" M_CTL_ALIAS_VAL=""
     M_HOOK_HASH="NONE" M_STUB_HASH="NONE" M_CTL_HASH="NONE" M_STUBS="NONE"
     while IFS= read -r line || [ -n "$line" ]; do
@@ -1899,6 +1903,7 @@ read_manifest() {
         v=${line#*=}
         case "$k" in
             version) M_VERSION=$v ;;
+            script_version) M_SCRIPT_VERSION=$v ;;
             mode) M_MODE=$v ;;
             hooks_dir) M_HOOKS_DIR=$v ;;
             hooksPath_prev) M_HOOKSPATH_PREV=$v ;;
@@ -1918,6 +1923,7 @@ read_manifest() {
 write_manifest() {
     cat > "$1" <<MAN
 version=1
+script_version=$W_SCRIPT_VERSION
 mode=$W_MODE
 hooks_dir=$W_HOOKS_DIR
 hooksPath_prev=$W_HOOKSPATH_PREV
@@ -2069,8 +2075,9 @@ cmd_status() {
     hp=$(git config "$scope_flag" --get core.hooksPath 2>/dev/null || echo unset)
     alias_disp=$M_ALIASES
     [ "$alias_disp" = "NONE" ] && alias_disp=none
-    printf 'state: %s (%s)\npersona: %s\nrate: %s\nhooksPath: %s\naliases: %s\n' \
-        "$state" "$M_MODE" "$eff_persona" "$eff_rate" "$hp" "$alias_disp"
+    ver_disp=${M_SCRIPT_VERSION:-$FAKEAUTHOR_VERSION}
+    printf 'state: %s (%s) v%s\npersona: %s\nrate: %s\nhooksPath: %s\naliases: %s\n' \
+        "$state" "$M_MODE" "$ver_disp" "$eff_persona" "$eff_rate" "$hp" "$alias_disp"
 }
 
 cmd_uninstall() {
@@ -2188,6 +2195,7 @@ cmd_set_personas() {
     sync_persona_aliases "$scope_flag" "$M_ALIASES" "$new_list"
 
     W_MODE=$M_MODE
+    W_SCRIPT_VERSION=${M_SCRIPT_VERSION:-$FAKEAUTHOR_VERSION}
     W_HOOKS_DIR=$M_HOOKS_DIR
     W_HOOKSPATH_PREV=$M_HOOKSPATH_PREV
     W_PERSONA=$new_csv
@@ -2271,14 +2279,144 @@ cmd_interactive() {
     print_preview "$PICKED_CSV"
 }
 
+fetch_installer() {
+    fi_out=$1
+    fi_url=${FAKEAUTHOR_UPDATE_URL:-$FAKEAUTHOR_UPDATE_URL_DEFAULT}
+    case "$fi_url" in
+        file://*)
+            fi_src=${fi_url#file://}
+            [ -r "$fi_src" ] || { echo "fakeauthor: update file not found: $fi_src" >&2; return 1; }
+            tr -d '\r' < "$fi_src" > "$fi_out"
+            ;;
+        *)
+            if command -v curl >/dev/null 2>&1; then
+                curl -fsSL --connect-timeout 5 --max-time 15 "$fi_url" -o "$fi_out.raw" || {
+                    rm -f "$fi_out.raw"
+                    echo "fakeauthor: failed to fetch update from $fi_url" >&2
+                    return 1
+                }
+                tr -d '\r' < "$fi_out.raw" > "$fi_out"
+                rm -f "$fi_out.raw"
+            elif command -v wget >/dev/null 2>&1; then
+                wget -qO "$fi_out.raw" -T 15 "$fi_url" || {
+                    rm -f "$fi_out.raw"
+                    echo "fakeauthor: failed to fetch update from $fi_url" >&2
+                    return 1
+                }
+                tr -d '\r' < "$fi_out.raw" > "$fi_out"
+                rm -f "$fi_out.raw"
+            else
+                echo "fakeauthor: update requires curl or wget" >&2
+                return 1
+            fi
+            ;;
+    esac
+    fi_head=$(sed -n '1p' "$fi_out" 2>/dev/null || true)
+    if [ "$fi_head" != "#!/bin/sh" ] || ! grep -q '^FAKEAUTHOR_VERSION=' "$fi_out" 2>/dev/null; then
+        echo "fakeauthor: downloaded installer failed validation ($fi_url)" >&2
+        return 1
+    fi
+}
+
+cmd_update() {
+    manifest=$1
+    scope_flag=$2
+    check_only=$3
+    force_flag=$4
+
+    installed=0
+    missing_files=0
+    cur_ver=""
+    if [ -f "$manifest" ]; then
+        installed=1
+        read_manifest "$manifest"
+        cur_ver=${M_SCRIPT_VERSION:-$FAKEAUTHOR_VERSION}
+        ctl_dir=$(cd "$(dirname "$manifest")" 2>/dev/null && pwd -P) || ctl_dir=""
+        [ -x "$M_HOOKS_DIR/commit-msg" ] || missing_files=1
+        [ -n "$ctl_dir" ] && [ -x "$ctl_dir/fakeauthor.sh" ] || missing_files=1
+        if [ "$M_MODE" = "global" ] && [ -n "$M_STUBS" ] && [ "$M_STUBS" != "NONE" ]; then
+            for stub in $M_STUBS; do
+                if [ ! -x "$M_HOOKS_DIR/$stub" ]; then
+                    missing_files=1
+                    break
+                fi
+            done
+        fi
+    fi
+
+    tmp_up=$(mktemp 2>/dev/null) || { echo "fakeauthor: failed to create temp file" >&2; return 1; }
+    if ! fetch_installer "$tmp_up"; then
+        rm -f "$tmp_up"
+        return 1
+    fi
+
+    remote_ver=$(sed -n 's/^FAKEAUTHOR_VERSION="\([^"]*\)".*/\1/p' "$tmp_up" 2>/dev/null | head -n 1)
+    [ -n "$remote_ver" ] || remote_ver="unknown"
+
+    if [ "$check_only" -eq 1 ]; then
+        rm -f "$tmp_up"
+        if [ "$installed" -eq 0 ]; then
+            echo "fakeauthor: not installed (latest: v$remote_ver) - run 'git fakeauthor update' to install"
+        elif [ "$missing_files" -eq 1 ]; then
+            echo "fakeauthor: missing files detected (v$cur_ver, latest: v$remote_ver) - run 'git fakeauthor update' to repair"
+        elif [ "$remote_ver" != "$cur_ver" ]; then
+            echo "fakeauthor: update available (v$cur_ver -> v$remote_ver) - run 'git fakeauthor update'"
+        else
+            echo "fakeauthor: up to date (v$cur_ver)"
+        fi
+        return 0
+    fi
+
+    if [ "$installed" -eq 0 ]; then
+        set -- "$scope_flag"
+        [ "$force_flag" -eq 1 ] && set -- "$@" --force
+        up_rc=0
+        FAKEAUTHOR_DIR="$FAKEAUTHOR_DIR" sh "$tmp_up" "$@" || up_rc=$?
+        rm -f "$tmp_up"
+        return "$up_rc"
+    fi
+
+    cur_persona=$(git config "$scope_flag" --get fakeauthor.persona 2>/dev/null || true)
+    [ -z "$cur_persona" ] && cur_persona=${M_PERSONA:-claude}
+
+    if [ "$force_flag" -eq 0 ] && [ "$missing_files" -eq 0 ] && [ "$remote_ver" = "$cur_ver" ]; then
+        files_ok=1
+        if [ -n "$M_HOOK_HASH" ] && [ "$M_HOOK_HASH" != "NONE" ]; then
+            cur_hh=$(git hash-object "$M_HOOKS_DIR/commit-msg" 2>/dev/null || true)
+            [ "$cur_hh" = "$M_HOOK_HASH" ] || files_ok=0
+        fi
+        if [ -n "$M_CTL_HASH" ] && [ "$M_CTL_HASH" != "NONE" ]; then
+            cur_ch=$(git hash-object "$ctl_dir/fakeauthor.sh" 2>/dev/null || true)
+            [ "$cur_ch" = "$M_CTL_HASH" ] || files_ok=0
+        fi
+        if [ "$files_ok" -eq 1 ]; then
+            rm -f "$tmp_up"
+            echo "fakeauthor: already up to date (v$cur_ver)"
+            return 0
+        fi
+    fi
+
+    set -- "--$M_MODE"
+    [ "$force_flag" -eq 1 ] && set -- "$@" --force
+    set -- "$@" "$cur_persona"
+    up_rc=0
+    FAKEAUTHOR_DIR="$FAKEAUTHOR_DIR" sh "$tmp_up" "$@" || up_rc=$?
+    rm -f "$tmp_up"
+    return "$up_rc"
+}
+
 main() {
     scope_override=""
+    check_only=0
+    force_flag=0
     pos1=""
     pos2=""
     while [ "$#" -gt 0 ]; do
         case "$1" in
             --local) scope_override="local" ;;
             --global) scope_override="global" ;;
+            --check) check_only=1 ;;
+            --force) force_flag=1 ;;
             -h|--help) ctl_usage; return 0 ;;
             -*) ctl_usage; return 2 ;;
             *)
@@ -2315,10 +2453,15 @@ main() {
 
     case "$pos1" in
         show)
+            [ "$check_only" -eq 0 ] && [ "$force_flag" -eq 0 ] || { ctl_usage; return 2; }
             cmd_show "$pos2"
             ;;
         "")
-            [ -n "$pos2" ] && { ctl_usage; return 2; }
+            [ -n "$pos2" ] && [ "$check_only" -eq 0 ] && [ "$force_flag" -eq 0 ] || :
+            if [ -n "$pos2" ] || [ "$check_only" -eq 1 ] || [ "$force_flag" -eq 1 ]; then
+                ctl_usage
+                return 2
+            fi
             if has_tty; then
                 cmd_interactive "$manifest" "$scope_flag" "$scope_override"
             else
@@ -2326,19 +2469,23 @@ main() {
             fi
             ;;
         status)
-            [ -n "$pos2" ] && { ctl_usage; return 2; }
+            [ -z "$pos2" ] && [ "$check_only" -eq 0 ] && [ "$force_flag" -eq 0 ] || { ctl_usage; return 2; }
             cmd_status "$manifest" "$scope_flag"
             ;;
         on|off)
-            [ -n "$pos2" ] && { ctl_usage; return 2; }
+            [ -z "$pos2" ] && [ "$check_only" -eq 0 ] && [ "$force_flag" -eq 0 ] || { ctl_usage; return 2; }
             cmd_on_off "$pos1" "$scope_override" "$manifest"
             ;;
-        uninstall)
+        update)
             [ -n "$pos2" ] && { ctl_usage; return 2; }
+            cmd_update "$manifest" "$scope_flag" "$check_only" "$force_flag"
+            ;;
+        uninstall)
+            [ -z "$pos2" ] && [ "$check_only" -eq 0 ] && [ "$force_flag" -eq 0 ] || { ctl_usage; return 2; }
             cmd_uninstall "$manifest" "$scope_flag"
             ;;
         all|claude|copilot|codex|cursor|aider|devin|*,*)
-            [ -n "$pos2" ] && { ctl_usage; return 2; }
+            [ -z "$pos2" ] && [ "$check_only" -eq 0 ] && [ "$force_flag" -eq 0 ] || { ctl_usage; return 2; }
             [ -f "$manifest" ] || { echo "fakeauthor: not installed; run install.sh first" >&2; return 1; }
             normalize_personas "$pos1" || { echo "fakeauthor: unknown persona: ${BAD_PERSONA:-$pos1}" >&2; return 1; }
             cmd_set_personas "$manifest" "$scope_flag" "$NORM_CSV" "$NORM_LIST"
@@ -2357,7 +2504,7 @@ EOF
 }
 
 read_manifest() {
-    M_VERSION="" M_MODE="" M_HOOKS_DIR="" M_HOOKSPATH_PREV="UNSET" M_PERSONA=""
+    M_VERSION="" M_SCRIPT_VERSION="" M_MODE="" M_HOOKS_DIR="" M_HOOKSPATH_PREV="UNSET" M_PERSONA=""
     M_KEYS="" M_ALIASES="NONE" M_CTL_ALIAS="NONE" M_CTL_ALIAS_VAL=""
     M_HOOK_HASH="NONE" M_STUB_HASH="NONE" M_CTL_HASH="NONE" M_STUBS="NONE"
     while IFS= read -r line || [ -n "$line" ]; do
@@ -2365,6 +2512,7 @@ read_manifest() {
         v=${line#*=}
         case "$k" in
             version) M_VERSION=$v ;;
+            script_version) M_SCRIPT_VERSION=$v ;;
             mode) M_MODE=$v ;;
             hooks_dir) M_HOOKS_DIR=$v ;;
             hooksPath_prev) M_HOOKSPATH_PREV=$v ;;
@@ -2384,6 +2532,7 @@ read_manifest() {
 write_manifest() {
     cat > "$1" <<EOF
 version=1
+script_version=$W_SCRIPT_VERSION
 mode=$W_MODE
 hooks_dir=$W_HOOKS_DIR
 hooksPath_prev=$W_HOOKSPATH_PREV
@@ -2518,12 +2667,28 @@ cmd_install_global() {
     fi
 
     if [ -f "$manifest" ]; then
+        had_manifest=1
         read_manifest "$manifest"
+        prev_ver=${M_SCRIPT_VERSION:-}
+        prev_persona=$M_PERSONA
         W_HOOKSPATH_PREV=$M_HOOKSPATH_PREV
         prev_hook_hash=$M_HOOK_HASH
         prev_stub_hash=$M_STUB_HASH
         prev_ctl_hash=$M_CTL_HASH
+        missing_files=0
+        [ -x "$hook_dir/commit-msg" ] || missing_files=1
+        [ -x "$ctl" ] || missing_files=1
+        for stub in $STUB_HOOKS; do
+            if [ ! -x "$hook_dir/$stub" ]; then
+                missing_files=1
+                break
+            fi
+        done
     else
+        had_manifest=0
+        prev_ver=""
+        prev_persona=""
+        missing_files=0
         for stub in $STUB_HOOKS; do
             if [ -e "$hook_dir/$stub" ] && [ "$force" -eq 0 ]; then
                 echo "fakeauthor: $hook_dir/$stub exists without fakeauthor manifest; refusing to clobber (try --local)" >&2
@@ -2577,21 +2742,41 @@ cmd_install_global() {
     sync_ctl_alias --global "$ctl_alias_target" "$M_CTL_ALIAS_VAL"
 
     W_MODE=global
+    W_SCRIPT_VERSION=$FAKEAUTHOR_VERSION
     W_HOOKS_DIR=$(canon_path "$hook_dir")
     W_PERSONA=$persona_csv
     write_manifest "$manifest"
 
+    if [ "$had_manifest" -eq 0 ]; then
+        install_action="installed $persona_csv ($W_MODE)"
+    elif [ "$missing_files" -eq 1 ]; then
+        install_action="repaired $persona_csv (v$FAKEAUTHOR_VERSION, $W_MODE)"
+    elif [ "$W_HOOK_HASH" != "$prev_hook_hash" ] || [ "$W_STUB_HASH" != "$prev_stub_hash" ] || [ "$W_CTL_HASH" != "$prev_ctl_hash" ] || [ "$prev_ver" != "$FAKEAUTHOR_VERSION" ]; then
+        if [ -n "$prev_ver" ] && [ "$prev_ver" != "$FAKEAUTHOR_VERSION" ]; then
+            install_action="updated v$prev_ver -> v$FAKEAUTHOR_VERSION ($W_MODE)"
+        else
+            install_action="updated $persona_csv (v$FAKEAUTHOR_VERSION, $W_MODE)"
+        fi
+    elif [ "$prev_persona" = "$persona_csv" ]; then
+        install_action="already up to date (v$FAKEAUTHOR_VERSION, $W_MODE)"
+    else
+        install_action="installed $persona_csv ($W_MODE)"
+    fi
+
     if [ "$show_preview" -eq 1 ]; then
+        if [ "$missing_files" -eq 1 ] || { [ "$had_manifest" -eq 1 ] && [ -n "$prev_ver" ] && [ "$prev_ver" != "$FAKEAUTHOR_VERSION" ]; }; then
+            echo "fakeauthor: $install_action"
+        fi
         echo "Saved: $persona_csv (global)"
         print_preview "$persona_csv"
-        echo "Manage anytime: git fakeauthor [on|off|status|uninstall]"
+        echo "Manage anytime: git fakeauthor [on|off|status|update|uninstall]"
     else
         if [ "$W_CTL_ALIAS" = "YES" ]; then
             verify_cmd="git fakeauthor status"
         else
             verify_cmd="$ctl_fallback"
         fi
-        printf 'fakeauthor: installed %s (global)\nverify: %s\n' "$persona_csv" "$verify_cmd"
+        printf 'fakeauthor: %s\nverify: %s\n' "$install_action" "$verify_cmd"
     fi
 }
 
@@ -2624,10 +2809,20 @@ cmd_install_local() {
     fi
 
     if [ -f "$manifest" ]; then
+        had_manifest=1
         read_manifest "$manifest"
+        prev_ver=${M_SCRIPT_VERSION:-}
+        prev_persona=$M_PERSONA
         prev_hook_hash=$M_HOOK_HASH
         prev_ctl_hash=$M_CTL_HASH
+        missing_files=0
+        [ -x "$hook_dir/commit-msg" ] || missing_files=1
+        [ -x "$ctl" ] || missing_files=1
     else
+        had_manifest=0
+        prev_ver=""
+        prev_persona=""
+        missing_files=0
         M_ALIASES="NONE"
         M_CTL_ALIAS_VAL=""
         prev_hook_hash=NONE
@@ -2651,6 +2846,7 @@ cmd_install_local() {
     sync_ctl_alias --local "$ctl_alias_target" "$M_CTL_ALIAS_VAL"
 
     W_MODE=local
+    W_SCRIPT_VERSION=$FAKEAUTHOR_VERSION
     W_HOOKS_DIR=$(canon_path "$hook_dir")
     W_HOOKSPATH_PREV=UNSET
     W_PERSONA=$persona_csv
@@ -2658,17 +2854,36 @@ cmd_install_local() {
     W_STUBS=NONE
     write_manifest "$manifest"
 
+    if [ "$had_manifest" -eq 0 ]; then
+        install_action="installed $persona_csv ($W_MODE)"
+    elif [ "$missing_files" -eq 1 ]; then
+        install_action="repaired $persona_csv (v$FAKEAUTHOR_VERSION, $W_MODE)"
+    elif [ "$W_HOOK_HASH" != "$prev_hook_hash" ] || [ "$W_CTL_HASH" != "$prev_ctl_hash" ] || [ "$prev_ver" != "$FAKEAUTHOR_VERSION" ]; then
+        if [ -n "$prev_ver" ] && [ "$prev_ver" != "$FAKEAUTHOR_VERSION" ]; then
+            install_action="updated v$prev_ver -> v$FAKEAUTHOR_VERSION ($W_MODE)"
+        else
+            install_action="updated $persona_csv (v$FAKEAUTHOR_VERSION, $W_MODE)"
+        fi
+    elif [ "$prev_persona" = "$persona_csv" ]; then
+        install_action="already up to date (v$FAKEAUTHOR_VERSION, $W_MODE)"
+    else
+        install_action="installed $persona_csv ($W_MODE)"
+    fi
+
     if [ "$show_preview" -eq 1 ]; then
+        if [ "$missing_files" -eq 1 ] || { [ "$had_manifest" -eq 1 ] && [ -n "$prev_ver" ] && [ "$prev_ver" != "$FAKEAUTHOR_VERSION" ]; }; then
+            echo "fakeauthor: $install_action"
+        fi
         echo "Saved: $persona_csv (local)"
         print_preview "$persona_csv"
-        echo "Manage anytime: git fakeauthor [on|off|status|uninstall]"
+        echo "Manage anytime: git fakeauthor [on|off|status|update|uninstall]"
     else
         if [ "$W_CTL_ALIAS" = "YES" ]; then
             verify_cmd="git fakeauthor status"
         else
             verify_cmd="sh .git/fakeauthor.sh status"
         fi
-        printf 'fakeauthor: installed %s (local)\nverify: %s\n' "$persona_csv" "$verify_cmd"
+        printf 'fakeauthor: %s\nverify: %s\n' "$install_action" "$verify_cmd"
     fi
 }
 
@@ -2737,6 +2952,7 @@ cmd_wizard() {
 
 SCOPE_FLAG=""
 FORCE=0
+CHECK_ONLY=0
 POS1=""
 POS2=""
 while [ "$#" -gt 0 ]; do
@@ -2744,6 +2960,7 @@ while [ "$#" -gt 0 ]; do
         --local) SCOPE_FLAG="local" ;;
         --global) SCOPE_FLAG="global" ;;
         --force) FORCE=1 ;;
+        --check) CHECK_ONLY=1 ;;
         -h|--help) usage; exit 0 ;;
         -*) usage; exit 2 ;;
         *)
@@ -2762,11 +2979,11 @@ done
 
 case "$POS1" in
     show)
-        [ -z "$SCOPE_FLAG" ] && [ "$FORCE" -eq 0 ] || { usage; exit 2; }
+        [ -z "$SCOPE_FLAG" ] && [ "$FORCE" -eq 0 ] && [ "$CHECK_ONLY" -eq 0 ] || { usage; exit 2; }
         cmd_show "$POS2"
         ;;
     "")
-        [ -n "$POS2" ] && { usage; exit 2; }
+        [ -n "$POS2" ] || [ "$CHECK_ONLY" -eq 1 ] && { usage; exit 2; }
         if has_tty; then
             cmd_wizard "$SCOPE_FLAG" "$FORCE"
         else
@@ -2778,7 +2995,7 @@ case "$POS1" in
         fi
         ;;
     all|claude|copilot|codex|cursor|aider|devin|*,*)
-        [ -n "$POS2" ] && { usage; exit 2; }
+        [ -n "$POS2" ] || [ "$CHECK_ONLY" -eq 1 ] && { usage; exit 2; }
         normalize_personas "$POS1" || {
             echo "fakeauthor: unknown persona: ${BAD_PERSONA:-$POS1}" >&2
             exit 1
@@ -2790,7 +3007,7 @@ case "$POS1" in
         fi
         ;;
     on|off|status|uninstall)
-        [ -n "$POS2" ] && { usage; exit 2; }
+        [ -n "$POS2" ] || [ "$CHECK_ONLY" -eq 1 ] && { usage; exit 2; }
         if [ "$SCOPE_FLAG" = "local" ]; then
             emit_ctl | FAKEAUTHOR_DIR="$FAKEAUTHOR_DIR" sh -s -- --local "$POS1"
         elif [ "$SCOPE_FLAG" = "global" ]; then
@@ -2798,6 +3015,16 @@ case "$POS1" in
         else
             emit_ctl | FAKEAUTHOR_DIR="$FAKEAUTHOR_DIR" sh -s -- "$POS1"
         fi
+        ;;
+    update)
+        [ -n "$POS2" ] && { usage; exit 2; }
+        set --
+        [ "$SCOPE_FLAG" = "local" ] && set -- "$@" --local
+        [ "$SCOPE_FLAG" = "global" ] && set -- "$@" --global
+        [ "$CHECK_ONLY" -eq 1 ] && set -- "$@" --check
+        [ "$FORCE" -eq 1 ] && set -- "$@" --force
+        set -- "$@" update
+        emit_ctl | FAKEAUTHOR_DIR="$FAKEAUTHOR_DIR" sh -s -- "$@"
         ;;
     *)
         usage
